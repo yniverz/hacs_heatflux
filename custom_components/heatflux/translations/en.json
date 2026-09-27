@@ -1,0 +1,177 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a room",
+        "description": "Net heat flow into or out of a room from the AC power and the room temperature. The room's heat capacity is learned automatically from AC power steps. Efficiency (COP) and calibration settings are under Configure afterwards.",
+        "data": {
+          "name": "Room name",
+          "temperature_sensor": "Room temperature",
+          "power_sensor": "AC power",
+          "power_type": "The AC power is",
+          "climate_entity": "AC climate entity",
+          "compressor_sensor": "Compressor running",
+          "coil_temperature_sensor": "Indoor coil temperature"
+        },
+        "data_description": {
+          "temperature_sensor": "A sensor you trust, away from the AC's air flow.",
+          "power_sensor": "W or kW. Electrical input power of the whole unit (preferred) or thermal output.",
+          "power_type": "Electrical input is multiplied by the COP. Thermal output must be signed (positive heating, negative cooling) unless a climate entity is given.",
+          "climate_entity": "Tells heating from cooling (hvac_action, else the hvac mode). Required for electrical power.",
+          "compressor_sensor": "Optional. While off, the AC adds no heat (standby and fan power are ignored).",
+          "coil_temperature_sensor": "Optional. Real condensing/evaporating temperature for the COP model, detects defrost and the direction in auto mode."
+        }
+      }
+    },
+    "error": {
+      "climate_required": "Electrical power has no sign: pick the AC climate entity so heating and cooling can be told apart.",
+      "outdoor_entity_required": "Pick the outdoor temperature entity, or choose another source."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Inputs",
+        "data": {
+          "temperature_sensor": "Room temperature",
+          "power_sensor": "AC power",
+          "power_type": "The AC power is",
+          "climate_entity": "AC climate entity",
+          "compressor_sensor": "Compressor running",
+          "coil_temperature_sensor": "Indoor coil temperature",
+          "outdoor_source": "Outdoor temperature from",
+          "outdoor_entity": "Outdoor temperature entity",
+          "pause_entities": "Pause calibration while on"
+        },
+        "data_description": {
+          "power_type": "Electrical input is multiplied by the COP. Thermal output must be signed unless a climate entity is given.",
+          "climate_entity": "Required for electrical power.",
+          "outdoor_source": "For the COP model. Open-Meteo uses the Home Assistant location and needs no account. Avoid sensors in the sun.",
+          "outdoor_entity": "A temperature sensor or a weather entity. Only used with the source \"Entity\".",
+          "pause_entities": "Binary sensors, switches, input booleans or sun.sun (paused while above the horizon). Examples: window open, sun on the window."
+        }
+      },
+      "settings": {
+        "title": "Settings",
+        "sections": {
+          "efficiency": {
+            "name": "Efficiency (COP)",
+            "description": "Only used for electrical power. The EU energy label gives SCOP (heating) and SEER (cooling); they roughly correspond to 7 °C and 25 °C outdoors. For EN 14511 rated values use 7 °C and 35 °C.",
+            "data": {
+              "cop_mode": "COP",
+              "heat_cop": "Heating COP",
+              "heat_ref_outdoor": "Heating COP applies at outdoor",
+              "cool_eer": "Cooling EER",
+              "cool_ref_outdoor": "Cooling EER applies at outdoor"
+            },
+            "data_description": {
+              "cop_mode": "Model: the value follows indoor, outdoor (and coil) temperature like a heat pump does. Fixed: always the value entered."
+            }
+          },
+          "calibration": {
+            "name": "Heat capacity calibration",
+            "description": "A step event: the AC power was stable, then changes by at least the minimum step. The temperature slope before is compared to the slope after the settling time.",
+            "data": {
+              "calibration_modes": "Use events from",
+              "min_events": "Valid events until calibrated",
+              "stable_minutes": "Stable before the step",
+              "stability_percent": "Stable within",
+              "stability_floor": "Stable within at least",
+              "min_step": "Minimum power step",
+              "settle_minutes": "Settling time after the step",
+              "fit_minutes": "Measuring time after settling",
+              "min_slope_change": "Minimum change of the temperature slope"
+            },
+            "data_description": {
+              "calibration_modes": "Cooling includes dehumidification (latent heat), which tends to make the heat capacity too small.",
+              "fit_minutes": "Keep this short: with longer windows walls and furniture take part and the heat capacity grows."
+            }
+          },
+          "live": {
+            "name": "Live calculation",
+            "data": {
+              "live_minutes": "Averaging window",
+              "manual_capacity": "Manual heat capacity (0 = learned)"
+            },
+            "data_description": {
+              "live_minutes": "Temperature slope and AC power are averaged over this window. The room sensor's resolution makes shorter windows noisy."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "climate_required": "Electrical power has no sign: pick the AC climate entity so heating and cooling can be told apart.",
+      "outdoor_entity_required": "Pick the outdoor temperature entity, or choose another source."
+    }
+  },
+  "selector": {
+    "power_type": {
+      "options": {
+        "electrical": "Electrical input (× COP)",
+        "thermal": "Thermal output"
+      }
+    },
+    "outdoor_source": {
+      "options": {
+        "open_meteo": "Open-Meteo (weather service)",
+        "entity": "Entity",
+        "none": "None (rated COP)"
+      }
+    },
+    "cop_mode": {
+      "options": {
+        "model": "Model (follows temperatures)",
+        "fixed": "Fixed"
+      }
+    },
+    "calibration_modes": {
+      "options": {
+        "all": "Heating and cooling",
+        "heat": "Heating only",
+        "cool": "Cooling only"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "net_heat_loss": {
+        "name": "Net heat loss"
+      },
+      "temperature_rate": {
+        "name": "Temperature rate"
+      },
+      "heat_capacity": {
+        "name": "Heat capacity"
+      },
+      "ac_heat_output": {
+        "name": "AC heat output"
+      },
+      "cop": {
+        "name": "COP"
+      },
+      "outdoor_temperature": {
+        "name": "Outdoor temperature"
+      },
+      "calibration_status": {
+        "name": "Calibration status",
+        "state": {
+          "waiting": "Waiting for a step",
+          "settling": "Settling",
+          "measuring": "Measuring",
+          "paused": "Paused"
+        }
+      }
+    },
+    "binary_sensor": {
+      "heat_capacity_calibrated": {
+        "name": "Heat capacity calibrated"
+      }
+    },
+    "button": {
+      "reset_calibration": {
+        "name": "Reset calibration"
+      }
+    }
+  }
+}

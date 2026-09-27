@@ -1,0 +1,12 @@
+{
+  "domain": "heatflux",
+  "name": "Heat Flux",
+  "codeowners": ["@yniverz"],
+  "config_flow": true,
+  "documentation": "https://github.com/yniverz/hacs_heatflux",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/yniverz/hacs_heatflux/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
