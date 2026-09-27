@@ -87,7 +87,7 @@ from .physics import (
     CopSettings,
     EventResult,
     Sample,
-    net_heat_loss,
+    net_heat_gain,
     summarize,
     window_stats,
 )
@@ -227,7 +227,7 @@ class HeatFluxEngine:
         self.reading: Reading | None = None
         self.temperature_rate: float | None = None
         self.mean_power: float | None = None
-        self.net_heat_loss: float | None = None
+        self.net_heat_gain: float | None = None
         self.outdoor_temperature: float | None = None
         self.summary: CapacitySummary = summarize([])
         self.last_event: EventResult | None = None
@@ -521,13 +521,13 @@ class HeatFluxEngine:
         samples = [s for s in self._live if s.t >= now - self._live_seconds]
         stats = window_stats(samples)
         if stats is None or stats.span < self._live_seconds * 0.5:
-            self.temperature_rate = self.mean_power = self.net_heat_loss = None
+            self.temperature_rate = self.mean_power = self.net_heat_gain = None
             return
         self.temperature_rate = stats.slope
         self.mean_power = stats.mean_power
         capacity = self.capacity
-        self.net_heat_loss = (
-            None if capacity is None else net_heat_loss(stats, capacity)
+        self.net_heat_gain = (
+            None if capacity is None else net_heat_gain(stats, capacity)
         )
 
     # -------------------------------------------------------------- capacity

@@ -4,7 +4,9 @@
 [![Validate](https://github.com/yniverz/hacs_heatflux/actions/workflows/validate.yml/badge.svg)](https://github.com/yniverz/hacs_heatflux/actions/workflows/validate.yml)
 [![Tests](https://github.com/yniverz/hacs_heatflux/actions/workflows/tests.yml/badge.svg)](https://github.com/yniverz/hacs_heatflux/actions/workflows/tests.yml)
 
-The **net heat flow into or out of a room**, in watts, live. It uses only the
+The **net heat flow into or out of a room** from its surroundings, in watts,
+live: positive while the room gains heat, negative while it loses heat, the
+same direction as the temperature rate. It uses only the
 power of the air conditioner and the room temperature. You don't need
 insulation values, a building model or an outdoor sensor for the heat flow
 itself.
@@ -17,19 +19,24 @@ power jumps (compressor starts, stops, big modulation steps).
 Energy balance of the room:
 
 ```
-C × dT/dt = P_ac − Q_loss      →      Q_loss = P_ac − C × dT/dt
+C × dT/dt = P_ac + Q_gain      →      Q_gain = C × dT/dt − P_ac
 ```
 
 | Symbol   | Meaning                                                          |
 |----------|------------------------------------------------------------------|
 | `P_ac`   | heat the AC puts into the room (W, negative while cooling)       |
-| `dT/dt`  | how fast the room temperature changes (K/h)                      |
+| `dT/dt`  | how fast the room temperature changes (K/h, positive: warming)   |
 | `C`      | effective heat capacity of the room (Wh/K), learned              |
-| `Q_loss` | **net** heat flow out of the room: walls, windows, air leakage, sun, people and devices together. Positive: the room loses heat. Negative: it gains heat. |
+| `Q_gain` | **net** heat flow into the room from everything except the AC: walls, windows, air leakage, sun, people and devices together. Positive: the room gains heat. Negative: it loses heat. |
+
+With the AC off, `Q_gain` has the same sign as the temperature rate. With the
+AC running they can differ. Say the AC heats and the room temperature holds
+steady: the rate is 0, and `Q_gain` is negative because the room loses exactly
+what the AC puts in.
 
 ### Learning the heat capacity
 
-`Q_loss` changes slowly. Across a sudden step of the AC power it stays about
+`Q_gain` changes slowly. Across a sudden step of the AC power it stays about
 the same, so
 
 ```
@@ -59,7 +66,7 @@ short window matches the timescale of the live calculation.
 Every 30 seconds, over the last 20 minutes:
 
 ```
-net heat loss = mean(P_ac) − C × slope(T)
+net heat gain = C × slope(T) − mean(P_ac)
 ```
 
 The AC power is averaged over the same window as the temperature slope so both
@@ -107,7 +114,7 @@ to about **7 °C** (SCOP) and **25 °C** (SEER) outdoors, which are the
 defaults. If you have EN 14511 rated COP / EER instead, use 7 °C and 35 °C.
 
 **How much the COP error matters:** a constant COP error scales `C` and the
-net heat loss by the same factor. The curve shape, the sign and the zero
+net heat gain by the same factor. The curve shape, the sign and the zero
 crossings stay correct. What would distort the result is a COP that changes
 with the weather, and that is what the model covers. The heat capacity can't
 tell a wrong COP apart on its own: with only these two sensors the method
@@ -177,7 +184,7 @@ For a room named *Living room*:
 
 | Entity | Unit | Notes |
 |--------|------|-------|
-| `sensor.living_room_net_heat_loss` | W | Net heat flow out of the room; negative: the room gains heat. Needs a heat capacity. |
+| `sensor.living_room_net_heat_gain` | W | Net heat flow into the room from its surroundings, without the AC. Positive: gaining heat. Negative: losing heat. Needs a heat capacity. |
 | `sensor.living_room_temperature_rate` | K/h | Temperature slope over the averaging window. |
 | `sensor.living_room_heat_capacity` | Wh/K | Heat capacity in use. Attributes: events, valid events, std dev, heating / cooling medians, last event. |
 | `sensor.living_room_ac_heat_output` | W | Thermal power of the AC (signed). Attributes: mode, defrost, input power, COP. |
@@ -198,7 +205,7 @@ For a room named *Living room*:
 - **Defrost cycles** (heating, coil colder than the room, or `hvac_action:
   defrosting`) count as 0 W and interrupt calibration.
 - **Portable single-hose ACs** pull outside air into the room while running.
-  Part of the "loss" is then caused by the AC itself.
+  Part of the heat loss is then caused by the AC itself.
 
 ## Development
 

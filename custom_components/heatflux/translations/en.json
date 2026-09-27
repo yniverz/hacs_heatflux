@@ -135,8 +135,8 @@
   },
   "entity": {
     "sensor": {
-      "net_heat_loss": {
-        "name": "Net heat loss"
+      "net_heat_gain": {
+        "name": "Net heat gain"
       },
       "temperature_rate": {
         "name": "Temperature rate"

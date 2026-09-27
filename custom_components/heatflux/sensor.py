@@ -1,4 +1,4 @@
-"""Sensors: net heat loss, temperature rate, heat capacity and diagnostics."""
+"""Sensors: net heat gain, temperature rate, heat capacity and diagnostics."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def _round(value: float | None, digits: int = 1) -> float | None:
     return None if value is None else round(value, digits)
 
 
-def _loss_attrs(engine: HeatFluxEngine) -> dict[str, Any]:
+def _gain_attrs(engine: HeatFluxEngine) -> dict[str, Any]:
     return {
         "ac_power_average": _round(engine.mean_power),
         "heat_capacity": _round(engine.capacity),
@@ -114,14 +114,14 @@ class HeatFluxSensorDescription(SensorEntityDescription):
 
 SENSORS: tuple[HeatFluxSensorDescription, ...] = (
     HeatFluxSensorDescription(
-        key="net_heat_loss",
-        translation_key="net_heat_loss",
+        key="net_heat_gain",
+        translation_key="net_heat_gain",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
         suggested_display_precision=0,
-        value_fn=lambda e: _round(e.net_heat_loss),
-        attrs_fn=_loss_attrs,
+        value_fn=lambda e: _round(e.net_heat_gain),
+        attrs_fn=_gain_attrs,
     ),
     HeatFluxSensorDescription(
         key="temperature_rate",

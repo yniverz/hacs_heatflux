@@ -110,7 +110,7 @@ async def test_entities(hass: HomeAssistant, open_meteo) -> None:
         e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
     assert ids == {
-        "sensor.living_room_net_heat_loss",
+        "sensor.living_room_net_heat_gain",
         "sensor.living_room_temperature_rate",
         "sensor.living_room_heat_capacity",
         "sensor.living_room_ac_heat_output",
@@ -126,7 +126,7 @@ async def test_entities(hass: HomeAssistant, open_meteo) -> None:
     assert float(output.state) == pytest.approx(250 * 3.9, rel=0.05)
     assert output.attributes["mode"] == "heat"
     assert hass.states.get("sensor.living_room_heat_capacity").state == "unknown"
-    assert hass.states.get("sensor.living_room_net_heat_loss").state == "unknown"
+    assert hass.states.get("sensor.living_room_net_heat_gain").state == "unknown"
     assert (
         hass.states.get("binary_sensor.living_room_heat_capacity_calibrated").state
         == "off"
@@ -135,7 +135,7 @@ async def test_entities(hass: HomeAssistant, open_meteo) -> None:
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert (
-        hass.states.get("sensor.living_room_net_heat_loss").state == STATE_UNAVAILABLE
+        hass.states.get("sensor.living_room_net_heat_gain").state == STATE_UNAVAILABLE
     )
 
 
@@ -216,8 +216,9 @@ async def test_calibration_through_states(
     rate = float(hass.states.get("sensor.living_room_temperature_rate").state)
     assert rate == pytest.approx((electrical * cop - loss) / capacity, rel=0.15)
     # The live window still reaches back before the step; the balance holds.
-    loss_state = hass.states.get("sensor.living_room_net_heat_loss")
-    assert float(loss_state.state) == pytest.approx(loss, abs=80)
+    # The room loses 300 W: the net heat gain is negative.
+    gain_state = hass.states.get("sensor.living_room_net_heat_gain")
+    assert float(gain_state.state) == pytest.approx(-loss, abs=80)
 
     # Persisted after the save delay.
     freezer.tick(timedelta(seconds=10))

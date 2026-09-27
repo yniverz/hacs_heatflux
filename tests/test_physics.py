@@ -23,7 +23,7 @@ from custom_components.heatflux.physics import (
     Sample,
     inliers,
     linear_slope,
-    net_heat_loss,
+    net_heat_gain,
     summarize,
     window_stats,
 )
@@ -105,7 +105,7 @@ def test_window_stats_slope_in_kelvin_per_hour() -> None:
     assert stats is not None
     assert stats.slope == pytest.approx(1.0)
     assert stats.mean_power == 100.0
-    assert net_heat_loss(stats, 150.0) == pytest.approx(-50.0)
+    assert net_heat_gain(stats, 150.0) == pytest.approx(50.0)
 
 
 # --------------------------------------------------------------- calibration

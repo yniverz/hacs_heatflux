@@ -6,9 +6,11 @@ data. Times are in seconds, temperatures in °C, powers in W (thermal, positive
 
 Energy balance of the room air (plus whatever follows it quickly):
 
-    C × dT/dt = P_ac − Q_loss   →   Q_loss = P_ac − C × dT/dt
+    C × dT/dt = P_ac + Q_gain   →   Q_gain = C × dT/dt − P_ac
 
-Across a sudden step of the AC power, Q_loss stays about the same, so
+Q_gain is the net heat flow into the room from everything but the AC (walls,
+windows, sun, people; negative: the room loses heat). Across a sudden step of
+the AC power, Q_gain stays about the same, so
 
     C = ΔP_ac / Δ(dT/dt)
 """
@@ -100,9 +102,9 @@ def window_stats(samples: Iterable[Sample]) -> WindowStats | None:
     )
 
 
-def net_heat_loss(stats: WindowStats, capacity: float) -> float:
-    """Net heat flow out of the room in W (negative: the room gains heat)."""
-    return stats.mean_power - capacity * stats.slope
+def net_heat_gain(stats: WindowStats, capacity: float) -> float:
+    """Net heat flow into the room in W, without the AC (negative: it loses heat)."""
+    return capacity * stats.slope - stats.mean_power
 
 
 # --------------------------------------------------------------------------- COP
