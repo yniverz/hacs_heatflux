@@ -59,6 +59,7 @@ def _capacity_attrs(engine: HeatFluxEngine) -> dict[str, Any]:
         "last_event": _time(last.t if last else None),
         "last_event_capacity": _round(last.capacity if last else None),
         "last_event_mode": last.mode if last else None,
+        "last_event_uncertainty": _round(last.uncertainty if last else None),
     }
 
 
@@ -100,6 +101,8 @@ def _status_attrs(engine: HeatFluxEngine) -> dict[str, Any]:
         "last_result": last.reason if last else None,
         "last_result_time": _time(last.t if last else None),
         "last_result_capacity": _round(last.capacity if last else None),
+        "last_result_power_step": _round(last.power_step if last else None),
+        "last_result_uncertainty": _round(last.uncertainty if last else None),
     }
 
 

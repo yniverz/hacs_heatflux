@@ -21,6 +21,7 @@ from custom_components.heatflux.physics import (
     CopSettings,
     EventResult,
     Sample,
+    fit_balance,
     inliers,
     linear_slope,
     net_heat_gain,
@@ -183,35 +184,98 @@ def test_states_follow_the_event() -> None:
     assert by_minute[55] == CalibrationState.WAITING
 
 
-def test_small_step_is_not_counted() -> None:
-    samples = simulate(step(30, 500, 650), resolution=0)
-    _, results, _ = run(samples)
+def test_small_changes_do_not_start_events() -> None:
+    def power(t: float) -> float:
+        base = 500.0 if t < 30 * MIN else 650.0
+        return base * (1.1 if int(t // MIN) % 2 else 0.9)
+
+    _, results, states = run(simulate(power, resolution=0))
+    assert not results
+    assert set(states) == {CalibrationState.WAITING}
+
+
+def test_short_spike_is_too_small() -> None:
+    def power(t: float) -> float:
+        return 900.0 if 30 * MIN <= t < 31 * MIN else 500.0
+
+    _, results, _ = run(simulate(power, resolution=0, minutes=60))
     assert not accepted(results)
-    assert {r.reason for r in results} == {"step_too_small"}
+    assert [r.reason for r in results] == ["step_too_small"]
 
 
-def test_unstable_power_after_step_aborts() -> None:
+def test_modulating_power_after_step_is_used() -> None:
     def power(t: float) -> float:
         if t < 30 * MIN:
             return 0.0
         return 1000.0 if int(t // (3 * MIN)) % 2 else 600.0
 
     _, results, _ = run(simulate(power, resolution=0))
-    assert not accepted(results)
-    assert results[0].reason == "power_unstable"
+    (estimate,) = accepted(results)[:1]
+    assert estimate.capacity == pytest.approx(200, rel=0.03)
 
 
-def test_no_event_without_stable_power_before() -> None:
+def test_flapping_power_before_step_is_used() -> None:
     def power(t: float) -> float:
         if t < 30 * MIN:
             return 400.0 if int(t // (5 * MIN)) % 2 else 0.0
         return 1500.0
 
-    samples = [s for s in simulate(power, resolution=0) if s.t <= 45 * MIN]
-    _, results, states = run(samples)
-    # The first stable window only starts after the flapping stopped.
-    assert not results
-    assert CalibrationState.SETTLING not in states[: int(30 * MIN / DT) + 1]
+    _, results, _ = run(simulate(power, resolution=0, minutes=60))
+    (estimate,) = accepted(results)
+    assert estimate.capacity == pytest.approx(200, rel=0.03)
+
+
+def inverter_power(start_minutes: float, seed: int, wiggle: float = 0.04):
+    """Compressor start: runs high, modulates down, power wiggles (thermal W)."""
+    rng = random.Random(seed)
+
+    def power(t: float) -> float:
+        minutes = t / MIN
+        if minutes < start_minutes:
+            return 0.0
+        electrical = 300 + 600 * math.exp(-(minutes - start_minutes) / 10)
+        return electrical * 3.8 * (1 + rng.gauss(0, wiggle))
+
+    return power
+
+
+def test_inverter_start_and_modulation() -> None:
+    """Realistic AC: no flat power anywhere, 0.1 °C sensor with noise."""
+    capacities = []
+    for seed in range(10):
+        samples = simulate(
+            inverter_power(60, seed),
+            capacity=300,
+            loss=lambda t: 400.0,
+            minutes=180,
+            noise=0.02,
+            seed=seed,
+        )
+        _, results, _ = run(samples)
+        estimates = accepted(results)
+        assert estimates, [r.reason for r in results]
+        capacities += [e.capacity for e in estimates]
+    assert all(abs(c / 300 - 1) < 0.15 for c in capacities)
+    assert summarize(
+        [CapacityEstimate(0, c, MODE_HEAT, 0, 0, 0, 0) for c in capacities]
+    ).capacity == pytest.approx(300, rel=0.05)
+
+
+def test_noisy_sensor_is_too_uncertain() -> None:
+    samples = simulate(step(30, 0, 400), noise=0.4, seed=3)
+    _, results, _ = run(samples)
+    assert not accepted(results)
+    assert results[0].reason == "too_uncertain"
+    assert results[0].uncertainty > 25
+
+
+def test_fit_balance_matches_slope_difference() -> None:
+    samples = simulate(step(20, 200, 1100), resolution=0, minutes=40)
+    fit = fit_balance(samples, 20 * MIN, 24 * MIN)
+    assert fit is not None
+    assert fit.capacity == pytest.approx(200, rel=1e-6)
+    assert fit.gain == pytest.approx(-300, rel=1e-6)
+    assert fit.uncertainty < 1
 
 
 def test_pause_interrupts_event() -> None:

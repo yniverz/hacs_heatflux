@@ -37,22 +37,42 @@ what the AC puts in.
 ### Learning the heat capacity
 
 `Q_gain` changes slowly. Across a sudden step of the AC power it stays about
-the same, so
+the same. With constant power on both sides of the step that gives
 
 ```
 C = ΔP_ac / Δ(dT/dt)
 ```
 
+Inverter ACs never hold their power constant, though. So the integration fits
+the energy balance itself. With `E(t)` the heat the AC has put in (Wh) and
+`h` the time in hours:
+
+```
+T(t) = a + (Q_gain / C) × h + E(t) / C
+```
+
+This is a linear least-squares fit, which copes with a 0.1 °C sensor. The
+windows before and after the step each get their own offset `a`, so a lagging
+sensor can't bias the result. With constant power it is exactly the formula
+above, but the power may modulate freely.
+
 A **step event** works like this:
 
-1. **Waiting.** The AC power was stable (±10 %, at least ±60 W) for 20 minutes
-   and then leaves that band. The temperature slope of those 20 minutes (linear
-   regression, which copes with a 0.1 °C sensor) is the slope *before*.
+1. **Waiting.** A sample at least 300 W away from the mean AC power of the
+   last 20 minutes starts an event. That window must not reach back into the
+   settling time of the previous event.
 2. **Settling.** The first 4 minutes after the step are skipped: air flow
-   settles and inverters ramp up.
-3. **Measuring.** The next 15 minutes give the slope *after*. The power must
-   be stable in there and at least 300 W away from before, otherwise the event
-   is dropped.
+   settles and inverters ramp up. These samples still count for `E(t)`.
+3. **Measuring.** After 15 more minutes the balance is fitted over the
+   20 minutes before the step and those 15 minutes. The event is dropped
+   if:
+   - the mean power of the two windows differs by less than 300 W
+     (`step_too_small`);
+   - the standard error of `C` is above 25 % (`too_uncertain`);
+   - `C` comes out negative or implausible.
+
+The reason for the last dropped event is an attribute of the calibration
+status sensor.
 
 Each valid event gives one `C`. The last 30 are kept across restarts. The
 heat capacity is their median after dropping outliers.
@@ -216,4 +236,4 @@ python -m venv .venv && .venv/bin/pip install -r requirements_test.txt
 
 The step detection and heat capacity estimation are plain Python in
 `custom_components/heatflux/physics.py` and are tested with synthetic rooms
-(sensor resolution, noise, ramps, gaps, pauses).
+(sensor resolution, noise, ramps, modulating inverter power, gaps, pauses).

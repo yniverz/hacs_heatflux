@@ -70,21 +70,20 @@
           },
           "calibration": {
             "name": "Heat capacity calibration",
-            "description": "A step event: the AC power was stable, then changes by at least the minimum step. The temperature slope before is compared to the slope after the settling time.",
+            "description": "A step event: the AC power changes by at least the minimum step compared to the window before. After the settling time and the measuring time, the energy balance is fitted over the window before and the measuring window. The power may keep modulating.",
             "data": {
               "calibration_modes": "Use events from",
               "min_events": "Valid events until calibrated",
-              "stable_minutes": "Stable before the step",
-              "stability_percent": "Stable within",
-              "stability_floor": "Stable within at least",
+              "before_minutes": "Window before the step",
               "min_step": "Minimum power step",
               "settle_minutes": "Settling time after the step",
               "fit_minutes": "Measuring time after settling",
-              "min_slope_change": "Minimum change of the temperature slope"
+              "max_uncertainty": "Maximum uncertainty"
             },
             "data_description": {
               "calibration_modes": "Cooling includes dehumidification (latent heat), which tends to make the heat capacity too small.",
-              "fit_minutes": "Keep this short: with longer windows walls and furniture take part and the heat capacity grows."
+              "fit_minutes": "Keep this short: with longer windows walls and furniture take part and the heat capacity grows.",
+              "max_uncertainty": "Events whose heat capacity has a larger standard error are dropped (noisy sensor, too small a step, the sun came out)."
             }
           },
           "live": {

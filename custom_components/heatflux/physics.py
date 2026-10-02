@@ -10,9 +10,9 @@ Energy balance of the room air (plus whatever follows it quickly):
 
 Q_gain is the net heat flow into the room from everything but the AC (walls,
 windows, sun, people; negative: the room loses heat). Across a sudden step of
-the AC power, Q_gain stays about the same, so
-
-    C = ΔP_ac / Δ(dT/dt)
+the AC power, Q_gain stays about the same, so (for constant power on both
+sides) C = ΔP_ac / Δ(dT/dt). `fit_balance` generalizes this to modulating
+power.
 """
 
 from __future__ import annotations
@@ -221,21 +221,15 @@ class CopModel:
 class CalibrationSettings:
     """Thresholds of the step detection."""
 
-    stable_minutes: float = 20.0
-    stability_percent: float = 10.0
-    stability_floor: float = 60.0  # W
+    before_minutes: float = 20.0
     min_step: float = 300.0  # W
     settle_minutes: float = 4.0
     fit_minutes: float = 15.0
-    min_slope_change: float = 0.2  # K/h
+    max_uncertainty: float = 25.0  # % (standard error of the heat capacity)
     min_coverage: float = 0.8
     max_gap_minutes: float = 3.0
     min_capacity: float = 5.0
     max_capacity: float = 20000.0
-
-    def tolerance(self, power: float) -> float:
-        """Allowed deviation from a mean power that still counts as stable."""
-        return max(abs(power) * self.stability_percent / 100.0, self.stability_floor)
 
 
 class CalibrationState(StrEnum):
@@ -258,6 +252,7 @@ class CapacityEstimate:
     power_after: float
     slope_before: float
     slope_after: float
+    uncertainty: float = 0.0  # % (standard error)
 
     def as_dict(self) -> dict[str, float | str]:
         """For storage."""
@@ -269,6 +264,7 @@ class CapacityEstimate:
             "power_after": self.power_after,
             "slope_before": self.slope_before,
             "slope_after": self.slope_after,
+            "uncertainty": self.uncertainty,
         }
 
     @classmethod
@@ -282,6 +278,7 @@ class CapacityEstimate:
             power_after=float(data["power_after"]),
             slope_before=float(data["slope_before"]),
             slope_after=float(data["slope_after"]),
+            uncertainty=float(data.get("uncertainty", 0.0)),
         )
 
 
@@ -294,6 +291,95 @@ class EventResult:
     reason: str
     estimate: CapacityEstimate | None = None
     capacity: float | None = None  # also set when rejected for its value
+    power_step: float | None = None
+    uncertainty: float | None = None
+
+
+@dataclass(frozen=True)
+class BalanceFit:
+    """Energy balance fitted across a step."""
+
+    capacity: float
+    gain: float  # W, net heat flow into the room without the AC
+    uncertainty: float  # % (standard error of the heat capacity)
+
+
+def _solve(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
+    """Solve a small linear system (Gauss-Jordan with partial pivoting)."""
+    n = len(vector)
+    rows = [[*matrix[i], vector[i]] for i in range(n)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(rows[r][col]))
+        if abs(rows[pivot][col]) < 1e-12:
+            return None
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        for r in range(n):
+            if r != col:
+                factor = rows[r][col] / rows[col][col]
+                rows[r] = [
+                    a - factor * b for a, b in zip(rows[r], rows[col], strict=True)
+                ]
+    return [rows[i][n] / rows[i][i] for i in range(n)]
+
+
+def fit_balance(
+    samples: list[Sample], before_end: float, after_start: float
+) -> BalanceFit | None:
+    """Fit C × dT/dt = P_ac + Q_gain over the samples around a step.
+
+    With E(t) the heat the AC put in since the first sample (Wh) and h the
+    hours since then, the room temperature follows
+
+        T = a + (Q_gain / C) × h + E / C
+
+    The samples before `before_end` and from `after_start` on get their own
+    offset `a`: a lagging sensor or the air flow change after the step then
+    can't bias the result, and the settling samples in between only count
+    for E. For constant power on each side this is the same as
+    C = ΔP / Δ(dT/dt), but the power may change within each side as well.
+    """
+    if len(samples) < 8:
+        return None
+    t0 = samples[0].t
+    energy = 0.0
+    rows: list[list[float]] = []
+    ys: list[float] = []
+    previous = samples[0]
+    for sample in samples:
+        energy += (previous.power + sample.power) / 2 * (sample.t - previous.t) / 3600
+        previous = sample
+        if before_end <= sample.t < after_start:
+            continue
+        before = 1.0 if sample.t < before_end else 0.0
+        rows.append([before, 1.0 - before, (sample.t - t0) / 3600, energy])
+        ys.append(sample.temperature)
+    n, p = len(rows), 4
+    if n <= p + 2:
+        return None
+    xtx = [[math.fsum(r[i] * r[j] for r in rows) for j in range(p)] for i in range(p)]
+    xty = [math.fsum(r[i] * y for r, y in zip(rows, ys, strict=True)) for i in range(p)]
+    coef = _solve(xtx, xty)
+    if coef is None:
+        return None
+    k = coef[3]
+    # Variance of k: residual variance × (XᵀX)⁻¹[3][3].
+    unit = _solve(xtx, [0.0, 0.0, 0.0, 1.0])
+    if unit is None or abs(k) < 1e-12:
+        return None
+    residuals = [
+        y - math.fsum(c * x for c, x in zip(coef, r, strict=True))
+        for r, y in zip(rows, ys, strict=True)
+    ]
+    variance = math.fsum(e * e for e in residuals) / (n - p)
+    # Quantized sensors can fit perfectly; keep a floor of a rounding error.
+    variance = max(variance, 0.01**2 / 12)
+    se_k = math.sqrt(max(variance * unit[3], 0.0))
+    capacity = 1 / k
+    return BalanceFit(
+        capacity=capacity,
+        gain=coef[2] * capacity,
+        uncertainty=abs(se_k / k) * 100,
+    )
 
 
 @dataclass
@@ -302,24 +388,25 @@ class _PendingEvent:
     before: WindowStats
 
 
-def _event_mode(before: WindowStats, after: WindowStats, samples: list[Sample]) -> str:
-    """Mode of the side with more power (the side the AC was working)."""
+def _event_mode(delta_power: float, samples: list[Sample]) -> str:
+    """Mode the AC was working in during the event."""
     modes = [s.mode for s in samples if s.mode != MODE_OFF]
     if not modes:
-        return MODE_HEAT if after.mean_power - before.mean_power > 0 else MODE_COOL
+        return MODE_HEAT if delta_power > 0 else MODE_COOL
     return max(set(modes), key=modes.count)
 
 
 class Calibrator:
     """Detects power steps and measures the heat capacity across each.
 
-    1. Waiting: the power was stable for `stable_minutes`; a sample that
-       leaves that band starts an event. The slope before comes from that
-       stable window.
+    1. Waiting: a sample at least `min_step` away from the mean power of the
+       last `before_minutes` starts an event. That window must not reach back
+       into the settling time of the previous event.
     2. Settling: the first `settle_minutes` after the step are skipped (air
        flow settles, inverters ramp up).
-    3. Measuring: the next `fit_minutes` give the slope after. The power has
-       to be stable in there and at least `min_step` away from before.
+    3. Measuring: after `fit_minutes` more, the energy balance is fitted over
+       the window before and the window after (see `fit_balance`). The power
+       may keep modulating; the result has to be precise enough instead.
     """
 
     def __init__(self, settings: CalibrationSettings) -> None:
@@ -327,6 +414,9 @@ class Calibrator:
         self.settings = settings
         self._samples: deque[Sample] = deque()
         self._pending: _PendingEvent | None = None
+        # The window before a step must not reach back into the settling of
+        # the previous one (a lagging sensor is still catching up there).
+        self._quiet_from = -math.inf
         self.state = CalibrationState.WAITING
         self.last_result: EventResult | None = None
 
@@ -339,11 +429,12 @@ class Calibrator:
         """Forget the running event and the history."""
         self._samples.clear()
         self._pending = None
+        self._quiet_from = -math.inf
         self.state = CalibrationState.WAITING
 
     def _history_seconds(self) -> float:
         s = self.settings
-        return (s.stable_minutes + s.settle_minutes + s.fit_minutes) * 60 + 300
+        return (s.before_minutes + s.settle_minutes + s.fit_minutes) * 60 + 300
 
     def _window(self, start: float, end: float) -> list[Sample]:
         return [x for x in self._samples if start <= x.t < end]
@@ -373,32 +464,28 @@ class Calibrator:
             return None
         self.state = CalibrationState.WAITING
 
-        stable_seconds = s.stable_minutes * 60
-        pre = self._window(sample.t - stable_seconds, sample.t)
-        if not self._covered(pre, stable_seconds) or not all(
+        before_seconds = s.before_minutes * 60
+        pre = self._window(max(sample.t - before_seconds, self._quiet_from), sample.t)
+        if not self._covered(pre, before_seconds) or not all(
             x.calibratable for x in pre
         ):
             return None
         stats = window_stats(pre)
-        if stats is None:
-            return None
-        tolerance = s.tolerance(stats.mean_power)
-        if (
-            stats.max_power - stats.mean_power > tolerance
-            or stats.mean_power - stats.min_power > tolerance
-        ):
-            return None
-        if abs(sample.power - stats.mean_power) <= tolerance:
+        if stats is None or abs(sample.power - stats.mean_power) < s.min_step:
             return None
         self._pending = _PendingEvent(t_step=sample.t, before=stats)
+        self._quiet_from = sample.t + s.settle_minutes * 60
         self.state = CalibrationState.SETTLING
         return None
 
-    def _abort(self, t: float, reason: str) -> EventResult:
+    def _finish(self, result: EventResult) -> EventResult:
         self._pending = None
         self.state = CalibrationState.WAITING
-        self.last_result = EventResult(t=t, accepted=False, reason=reason)
-        return self.last_result
+        self.last_result = result
+        return result
+
+    def _abort(self, t: float, reason: str, **details: float) -> EventResult:
+        return self._finish(EventResult(t=t, accepted=False, reason=reason, **details))
 
     def _advance(self, sample: Sample) -> EventResult | None:
         s = self.settings
@@ -416,52 +503,48 @@ class Calibrator:
         if sample.t < fit_end:
             return None
 
+        before = pending.before
         post = self._window(settle_end, sample.t + 0.001)
-        event_samples = self._window(pending.t_step, sample.t + 0.001)
-        if not all(x.calibratable for x in event_samples):
+        event = self._window(before.start, sample.t + 0.001)
+        if not all(x.calibratable for x in event):
             return self._abort(sample.t, "interrupted")
         if not self._covered(post, s.fit_minutes * 60):
             return self._abort(sample.t, "missing_data")
         after = window_stats(post)
         if after is None:
             return self._abort(sample.t, "missing_data")
-        before = pending.before
         delta_power = after.mean_power - before.mean_power
         if abs(delta_power) < s.min_step:
-            return self._abort(sample.t, "step_too_small")
-        tolerance = s.tolerance(after.mean_power)
-        if (
-            after.max_power - after.mean_power > tolerance
-            or after.mean_power - after.min_power > tolerance
-        ):
-            return self._abort(sample.t, "power_unstable")
-        delta_slope = after.slope - before.slope
-        if abs(delta_slope) < s.min_slope_change:
-            return self._abort(sample.t, "slope_change_too_small")
-        capacity = delta_power / delta_slope
-        self._pending = None
-        self.state = CalibrationState.WAITING
-        if not s.min_capacity <= capacity <= s.max_capacity:
-            self.last_result = EventResult(
-                t=sample.t,
-                accepted=False,
-                reason="implausible" if capacity > 0 else "wrong_direction",
-                capacity=capacity,
-            )
-            return self.last_result
+            return self._abort(sample.t, "step_too_small", power_step=delta_power)
+        fit = fit_balance(event, pending.t_step, settle_end)
+        if fit is None:
+            return self._abort(sample.t, "missing_data", power_step=delta_power)
+        details = {
+            "capacity": fit.capacity,
+            "power_step": delta_power,
+            "uncertainty": fit.uncertainty,
+        }
+        if fit.capacity <= 0:
+            return self._abort(sample.t, "wrong_direction", **details)
+        if fit.uncertainty > s.max_uncertainty:
+            return self._abort(sample.t, "too_uncertain", **details)
+        if not s.min_capacity <= fit.capacity <= s.max_capacity:
+            return self._abort(sample.t, "implausible", **details)
         estimate = CapacityEstimate(
             t=sample.t,
-            capacity=capacity,
-            mode=_event_mode(before, after, event_samples),
+            capacity=fit.capacity,
+            mode=_event_mode(delta_power, event),
             power_before=before.mean_power,
             power_after=after.mean_power,
             slope_before=before.slope,
             slope_after=after.slope,
+            uncertainty=fit.uncertainty,
         )
-        self.last_result = EventResult(
-            t=sample.t, accepted=True, reason="ok", estimate=estimate, capacity=capacity
+        return self._finish(
+            EventResult(
+                t=sample.t, accepted=True, reason="ok", estimate=estimate, **details
+            )
         )
-        return self.last_result
 
 
 # ------------------------------------------------------------------ estimates

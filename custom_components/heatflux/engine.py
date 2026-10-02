@@ -29,6 +29,7 @@ from homeassistant.util.unit_conversion import PowerConverter, TemperatureConver
 
 from .const import (
     COIL_DIRECTION_MARGIN,
+    CONF_BEFORE,
     CONF_CALIBRATION_MODES,
     CONF_CLIMATE,
     CONF_COIL,
@@ -41,8 +42,8 @@ from .const import (
     CONF_HEAT_REF,
     CONF_LIVE_WINDOW,
     CONF_MANUAL_CAPACITY,
+    CONF_MAX_UNCERTAINTY,
     CONF_MIN_EVENTS,
-    CONF_MIN_SLOPE_CHANGE,
     CONF_MIN_STEP,
     CONF_OUTDOOR,
     CONF_OUTDOOR_SOURCE,
@@ -50,9 +51,6 @@ from .const import (
     CONF_POWER,
     CONF_POWER_TYPE,
     CONF_SETTLE,
-    CONF_STABILITY,
-    CONF_STABILITY_FLOOR,
-    CONF_STABLE,
     CONF_TEMPERATURE,
     COP_FIXED,
     DEFAULTS,
@@ -206,13 +204,11 @@ class HeatFluxEngine:
         )
         self.calibrator = Calibrator(
             CalibrationSettings(
-                stable_minutes=float(c[CONF_STABLE]),
-                stability_percent=float(c[CONF_STABILITY]),
-                stability_floor=float(c[CONF_STABILITY_FLOOR]),
+                before_minutes=float(c[CONF_BEFORE]),
                 min_step=float(c[CONF_MIN_STEP]),
                 settle_minutes=float(c[CONF_SETTLE]),
                 fit_minutes=float(c[CONF_FIT]),
-                min_slope_change=float(c[CONF_MIN_SLOPE_CHANGE]),
+                max_uncertainty=float(c[CONF_MAX_UNCERTAINTY]),
             )
         )
         self._live_seconds = float(c[CONF_LIVE_WINDOW]) * 60

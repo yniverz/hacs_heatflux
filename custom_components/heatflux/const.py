@@ -36,13 +36,11 @@ COP_MODEL = "model"
 COP_FIXED = "fixed"
 
 # Calibration.
-CONF_STABLE = "stable_minutes"
-CONF_STABILITY = "stability_percent"
-CONF_STABILITY_FLOOR = "stability_floor"
+CONF_BEFORE = "before_minutes"
 CONF_MIN_STEP = "min_step"
 CONF_SETTLE = "settle_minutes"
 CONF_FIT = "fit_minutes"
-CONF_MIN_SLOPE_CHANGE = "min_slope_change"
+CONF_MAX_UNCERTAINTY = "max_uncertainty"
 CONF_CALIBRATION_MODES = "calibration_modes"
 CONF_MIN_EVENTS = "min_events"
 CONF_MANUAL_CAPACITY = "manual_capacity"
@@ -74,13 +72,11 @@ DEFAULTS: dict[str, Any] = {
     CONF_COOL_EER: 6.1,
     CONF_COOL_REF: 25.0,
     CONF_LIVE_WINDOW: 20,
-    CONF_STABLE: 20,
-    CONF_STABILITY: 10,
-    CONF_STABILITY_FLOOR: 60,
+    CONF_BEFORE: 20,
     CONF_MIN_STEP: 300,
     CONF_SETTLE: 4,
     CONF_FIT: 15,
-    CONF_MIN_SLOPE_CHANGE: 0.2,
+    CONF_MAX_UNCERTAINTY: 25,
     CONF_CALIBRATION_MODES: MODES_ALL,
     CONF_MIN_EVENTS: 5,
     CONF_MANUAL_CAPACITY: 0,
