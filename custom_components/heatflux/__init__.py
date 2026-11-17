@@ -1,7 +1,8 @@
 """The Heat Flux integration.
 
-Net heat flow into or out of a room from the AC power and the room
-temperature, with the room's heat capacity learned from power steps.
+Net heat flow into or out of a room and its real temperature, from the AC
+power and the room temperature, with a two-node room model (air and mass)
+learned from the data.
 """
 
 from __future__ import annotations
@@ -38,8 +39,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: HeatFluxConfigEntry) ->
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Delete the stored heat capacity estimates."""
-    await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
+    """Delete the stored room model and history."""
+    for key in (f"{DOMAIN}.{entry.entry_id}.model", f"{DOMAIN}.{entry.entry_id}"):
+        await Store(hass, STORAGE_VERSION, key).async_remove()
 
 
 async def _async_reload(hass: HomeAssistant, entry: HeatFluxConfigEntry) -> None:

@@ -1,4 +1,4 @@
-"""Binary sensor: whether the heat capacity is calibrated."""
+"""Binary sensor: whether the room model is ready."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import HeatFluxConfigEntry
 from .entity import HeatFluxEntity
 
-CALIBRATED = BinarySensorEntityDescription(
-    key="heat_capacity_calibrated",
-    translation_key="heat_capacity_calibrated",
+READY = BinarySensorEntityDescription(
+    key="model_ready",
+    translation_key="model_ready",
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
@@ -26,13 +26,13 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Add the binary sensor."""
-    async_add_entities([CalibratedSensor(entry, CALIBRATED)])
+    async_add_entities([ReadySensor(entry, READY)])
 
 
-class CalibratedSensor(HeatFluxEntity, BinarySensorEntity):
-    """On after enough valid step events, or with a manual heat capacity."""
+class ReadySensor(HeatFluxEntity, BinarySensorEntity):
+    """On once the room model has been fitted."""
 
     @property
     def is_on(self) -> bool:
-        """Whether the heat capacity can be trusted."""
-        return self._engine.calibrated
+        """Whether the model has parameters."""
+        return self._engine.ready

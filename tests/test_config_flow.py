@@ -103,23 +103,13 @@ async def test_options_flow(hass: HomeAssistant) -> None:
                 "cool_eer": 7.0,
                 "cool_ref_outdoor": 25,
             },
-            "calibration": {
-                "calibration_modes": "heat",
-                "min_events": 3.0,
-                "before_minutes": 20,
-                "min_step": 300,
-                "settle_minutes": 4,
-                "fit_minutes": 15,
-                "max_uncertainty": 25,
-            },
-            "live": {"live_minutes": 20, "manual_capacity": 0},
+            "model": {"history_days": 5.0, "refit_hours": 6.0, "live_minutes": 20},
         },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     options = entry.options
     assert options["heat_cop"] == 4.1
-    assert options["min_events"] == 3
-    assert options["calibration_modes"] == "heat"
+    assert options["history_days"] == 5
     assert options["outdoor_entity"] == "sensor.outside"
     assert options["pause_entities"] == ["binary_sensor.window"]
     assert "compressor_sensor" not in options

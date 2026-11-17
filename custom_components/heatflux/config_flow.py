@@ -17,37 +17,28 @@ from homeassistant.helpers import selector
 import voluptuous as vol
 
 from .const import (
-    CONF_BEFORE,
-    CONF_CALIBRATION_MODES,
     CONF_CLIMATE,
     CONF_COIL,
     CONF_COMPRESSOR,
     CONF_COOL_EER,
     CONF_COOL_REF,
     CONF_COP_MODE,
-    CONF_FIT,
     CONF_HEAT_COP,
     CONF_HEAT_REF,
+    CONF_HISTORY_DAYS,
     CONF_LIVE_WINDOW,
-    CONF_MANUAL_CAPACITY,
-    CONF_MAX_UNCERTAINTY,
-    CONF_MIN_EVENTS,
-    CONF_MIN_STEP,
     CONF_OUTDOOR,
     CONF_OUTDOOR_SOURCE,
     CONF_PAUSE,
     CONF_POWER,
     CONF_POWER_TYPE,
-    CONF_SETTLE,
+    CONF_REFIT_HOURS,
     CONF_TEMPERATURE,
     COP_FIXED,
     COP_MODEL,
     DEFAULT_NAME,
     DEFAULTS,
     DOMAIN,
-    MODES_ALL,
-    MODES_COOL,
-    MODES_HEAT,
     OUTDOOR_ENTITY,
     OUTDOOR_NONE,
     OUTDOOR_OPEN_METEO,
@@ -63,18 +54,12 @@ NUMBERS: dict[str, tuple[float, float, float, str | None]] = {
     CONF_HEAT_REF: (-20.0, 20.0, 0.5, "°C"),
     CONF_COOL_EER: (1.0, 15.0, 0.1, None),
     CONF_COOL_REF: (15.0, 45.0, 0.5, "°C"),
+    CONF_HISTORY_DAYS: (1, 14, 1, "d"),
+    CONF_REFIT_HOURS: (1, 48, 1, "h"),
     CONF_LIVE_WINDOW: (5, 60, 1, "min"),
-    CONF_BEFORE: (5, 120, 1, "min"),
-    CONF_MIN_STEP: (50, 5000, 10, "W"),
-    CONF_SETTLE: (0, 30, 0.5, "min"),
-    CONF_FIT: (5, 60, 1, "min"),
-    CONF_MAX_UNCERTAINTY: (1, 100, 1, "%"),
-    CONF_MIN_EVENTS: (1, 30, 1, None),
-    CONF_MANUAL_CAPACITY: (0, 20000, 1, "Wh/K"),
 }
 SELECTS: dict[str, list[str]] = {
     CONF_COP_MODE: [COP_MODEL, COP_FIXED],
-    CONF_CALIBRATION_MODES: [MODES_ALL, MODES_HEAT, MODES_COOL],
 }
 SECTIONS: dict[str, tuple[str, ...]] = {
     "efficiency": (
@@ -84,18 +69,9 @@ SECTIONS: dict[str, tuple[str, ...]] = {
         CONF_COOL_EER,
         CONF_COOL_REF,
     ),
-    "calibration": (
-        CONF_CALIBRATION_MODES,
-        CONF_MIN_EVENTS,
-        CONF_BEFORE,
-        CONF_MIN_STEP,
-        CONF_SETTLE,
-        CONF_FIT,
-        CONF_MAX_UNCERTAINTY,
-    ),
-    "live": (CONF_LIVE_WINDOW, CONF_MANUAL_CAPACITY),
+    "model": (CONF_HISTORY_DAYS, CONF_REFIT_HOURS, CONF_LIVE_WINDOW),
 }
-INT_KEYS = (CONF_MIN_EVENTS,)
+INT_KEYS = (CONF_HISTORY_DAYS, CONF_REFIT_HOURS)
 
 
 def _entity(domains: list[str], multiple: bool = False) -> selector.Selector:
@@ -226,7 +202,7 @@ class HeatFluxConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class HeatFluxOptionsFlow(OptionsFlow):
-    """Step 1: input entities. Step 2: efficiency and calibration."""
+    """Step 1: input entities. Step 2: efficiency and room model."""
 
     def __init__(self) -> None:
         """Initialize."""
@@ -260,7 +236,7 @@ class HeatFluxOptionsFlow(OptionsFlow):
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Efficiency, calibration and live calculation settings."""
+        """Efficiency and room model settings."""
         current = self._current()
         if user_input is not None:
             flat: dict[str, Any] = {}

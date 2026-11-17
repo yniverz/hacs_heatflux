@@ -35,20 +35,10 @@ CONF_COOL_REF = "cool_ref_outdoor"
 COP_MODEL = "model"
 COP_FIXED = "fixed"
 
-# Calibration.
-CONF_BEFORE = "before_minutes"
-CONF_MIN_STEP = "min_step"
-CONF_SETTLE = "settle_minutes"
-CONF_FIT = "fit_minutes"
-CONF_MAX_UNCERTAINTY = "max_uncertainty"
-CONF_CALIBRATION_MODES = "calibration_modes"
-CONF_MIN_EVENTS = "min_events"
-CONF_MANUAL_CAPACITY = "manual_capacity"
+# Room model.
+CONF_HISTORY_DAYS = "history_days"
+CONF_REFIT_HOURS = "refit_hours"
 CONF_LIVE_WINDOW = "live_minutes"
-
-MODES_ALL = "all"
-MODES_HEAT = "heat"
-MODES_COOL = "cool"
 
 SOURCE_KEYS = (
     CONF_TEMPERATURE,
@@ -72,23 +62,34 @@ DEFAULTS: dict[str, Any] = {
     CONF_COOL_EER: 6.1,
     CONF_COOL_REF: 25.0,
     CONF_LIVE_WINDOW: 20,
-    CONF_BEFORE: 20,
-    CONF_MIN_STEP: 300,
-    CONF_SETTLE: 4,
-    CONF_FIT: 15,
-    CONF_MAX_UNCERTAINTY: 25,
-    CONF_CALIBRATION_MODES: MODES_ALL,
-    CONF_MIN_EVENTS: 5,
-    CONF_MANUAL_CAPACITY: 0,
+    CONF_HISTORY_DAYS: 4,
+    CONF_REFIT_HOURS: 6,
 }
 
 SAMPLE_INTERVAL_SECONDS = 30
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_INTERVAL_MINUTES = 15
 OUTDOOR_MAX_AGE_HOURS = 2
-MAX_ESTIMATES = 30
+# The model needs this much history, with the AC switching on and off a few
+# times, before the first fit.
+MIN_HISTORY_HOURS = 12
+MIN_AC_CHANGES = 6
+# Fits run on a grid of this many minutes (half the work of 1 min, same result).
+FIT_STEP_MINUTES = 2
+FIT_EVALUATIONS = 900
+REFIT_EVALUATIONS = 400
+# Check every this many minutes whether a fit is due.
+FIT_CHECK_MINUTES = 30
+# A new fit replaces the old one unless it predicts this much worse.
+FIT_ACCEPT_RATIO = 1.02
+# The live filter starts over after a gap this long (h).
+FILTER_RESET_HOURS = 0.25
 # The indoor coil is this much colder than the room while "heating": defrost.
 DEFROST_MARGIN = 2.0
+# While heating, the AC only delivers heat once the coil is this much warmer
+# than the room (and while cooling, colder): the indoor fan waits for it, and
+# after a defrost the coil first has to warm up again.
+COIL_DELIVERY_MARGIN = 5.0
 # Coil vs room in auto mode without hvac_action: which way the AC works.
 COIL_DIRECTION_MARGIN = 3.0
 PAUSE_STATES = frozenset({"on", "open", "above_horizon", "true"})

@@ -1,4 +1,4 @@
-"""Reads the input entities, samples them and runs the calculations."""
+"""Reads the input entities, keeps the history and runs the room model."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -28,38 +29,36 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import PowerConverter, TemperatureConverter
 
 from .const import (
+    COIL_DELIVERY_MARGIN,
     COIL_DIRECTION_MARGIN,
-    CONF_BEFORE,
-    CONF_CALIBRATION_MODES,
     CONF_CLIMATE,
     CONF_COIL,
     CONF_COMPRESSOR,
     CONF_COOL_EER,
     CONF_COOL_REF,
     CONF_COP_MODE,
-    CONF_FIT,
     CONF_HEAT_COP,
     CONF_HEAT_REF,
+    CONF_HISTORY_DAYS,
     CONF_LIVE_WINDOW,
-    CONF_MANUAL_CAPACITY,
-    CONF_MAX_UNCERTAINTY,
-    CONF_MIN_EVENTS,
-    CONF_MIN_STEP,
     CONF_OUTDOOR,
     CONF_OUTDOOR_SOURCE,
     CONF_PAUSE,
     CONF_POWER,
     CONF_POWER_TYPE,
-    CONF_SETTLE,
+    CONF_REFIT_HOURS,
     CONF_TEMPERATURE,
     COP_FIXED,
     DEFAULTS,
     DEFROST_MARGIN,
     DOMAIN,
-    MAX_ESTIMATES,
-    MODES_ALL,
-    MODES_COOL,
-    MODES_HEAT,
+    FILTER_RESET_HOURS,
+    FIT_ACCEPT_RATIO,
+    FIT_CHECK_MINUTES,
+    FIT_EVALUATIONS,
+    FIT_STEP_MINUTES,
+    MIN_AC_CHANGES,
+    MIN_HISTORY_HOURS,
     OPEN_METEO_INTERVAL_MINUTES,
     OPEN_METEO_URL,
     OUTDOOR_ENTITY,
@@ -67,30 +66,36 @@ from .const import (
     OUTDOOR_OPEN_METEO,
     PAUSE_STATES,
     POWER_ELECTRICAL,
+    REFIT_EVALUATIONS,
     SAMPLE_INTERVAL_SECONDS,
     STORAGE_VERSION,
+)
+from .history import MinuteHistory
+from .model import (
+    AIR,
+    FitResult,
+    RoomFilter,
+    RoomParams,
+    Series,
+    fit,
+    prediction_cost,
+    warm_state,
 )
 from .physics import (
     MODE_COOL,
     MODE_DRY,
     MODE_HEAT,
     MODE_OFF,
-    CalibrationSettings,
-    CalibrationState,
-    Calibrator,
-    CapacityEstimate,
-    CapacitySummary,
     CopModel,
     CopResult,
     CopSettings,
-    EventResult,
     Sample,
-    net_heat_gain,
-    summarize,
     window_stats,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+SAVE_DELAY_SECONDS = 600
 
 _ACTIONS = {
     "heating": MODE_HEAT,
@@ -162,6 +167,23 @@ def _float(value: Any) -> float | None:
     return result if result == result else None  # NaN
 
 
+def coil_delivers(mode: str | None, coil: float | None, room: float | None) -> bool:
+    """Whether the indoor coil is hot (heating) or cold (cooling) enough.
+
+    The indoor fan waits for a warm coil after the compressor starts, and
+    after a defrost the coil first has to warm up again: until then the
+    compressor runs but no heat reaches the room. Without a coil sensor this
+    can't be told and the AC always counts as delivering.
+    """
+    if coil is None or room is None:
+        return True
+    if mode == MODE_HEAT:
+        return coil >= room + COIL_DELIVERY_MARGIN
+    if mode in (MODE_COOL, MODE_DRY):
+        return coil <= room - COIL_DELIVERY_MARGIN
+    return True
+
+
 @dataclass(frozen=True)
 class Reading:
     """Current values of the inputs."""
@@ -172,11 +194,21 @@ class Reading:
     thermal_power: float | None
     cop: CopResult | None
     paused: bool
+    delivering: bool = True
 
     @property
-    def calibratable(self) -> bool:
-        """Whether this reading may enter a calibration event."""
+    def fittable(self) -> bool:
+        """Whether this reading may count for the model fit."""
         return not self.paused and not self.direction.defrost
+
+
+class ModelStatus:
+    """What the room model is doing."""
+
+    LEARNING = "learning"
+    FITTING = "fitting"
+    READY = "ready"
+    ALL = (LEARNING, FITTING, READY)
 
 
 class HeatFluxEngine:
@@ -187,8 +219,9 @@ class HeatFluxEngine:
         self.hass = hass
         self.config = {**DEFAULTS, **config}
         c = self.config
+        self._entry_id = entry_id
         self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}"
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.model"
         )
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
@@ -202,18 +235,22 @@ class HeatFluxEngine:
                 cool_ref_outdoor=float(c[CONF_COOL_REF]),
             )
         )
-        self.calibrator = Calibrator(
-            CalibrationSettings(
-                before_minutes=float(c[CONF_BEFORE]),
-                min_step=float(c[CONF_MIN_STEP]),
-                settle_minutes=float(c[CONF_SETTLE]),
-                fit_minutes=float(c[CONF_FIT]),
-                max_uncertainty=float(c[CONF_MAX_UNCERTAINTY]),
-            )
-        )
         self._live_seconds = float(c[CONF_LIVE_WINDOW]) * 60
         self._live: deque[Sample] = deque()
-        self.estimates: list[CapacityEstimate] = []
+        self.history = MinuteHistory(int(float(c[CONF_HISTORY_DAYS]) * 24 * 60))
+        self._refit_seconds = float(c[CONF_REFIT_HOURS]) * 3600
+
+        self.params: RoomParams | None = None
+        self.last_fit: FitResult | None = None
+        self.last_fit_time: float | None = None
+        self.last_fit_seconds: float | None = None
+        self.last_fit_outcome: str | None = None
+        self.fitting = False
+        self._stored_errors: list[float] | None = None
+        self._save_requested: float | None = None
+        self.filter: RoomFilter | None = None
+        self._filter_time: float | None = None
+        self._last_power = 0.0
 
         self._outdoor_fetched: float | None = None
         self._outdoor_fetched_value: float | None = None
@@ -222,23 +259,34 @@ class HeatFluxEngine:
         # Published values.
         self.reading: Reading | None = None
         self.temperature_rate: float | None = None
-        self.mean_power: float | None = None
-        self.net_heat_gain: float | None = None
         self.outdoor_temperature: float | None = None
-        self.summary: CapacitySummary = summarize([])
-        self.last_event: EventResult | None = None
+        self.settled_temperature: float | None = None
 
     # ----------------------------------------------------------------- setup
 
     async def async_start(self) -> None:
-        """Load the stored estimates and start listening."""
+        """Load the stored model and history and start listening."""
         stored = await self._store.async_load() or {}
-        for item in stored.get("estimates", []):
+        self.history = MinuteHistory.from_dict(
+            stored.get("history") or {}, self.history.max_minutes
+        )
+        if params := stored.get("params"):
             try:
-                self.estimates.append(CapacityEstimate.from_dict(item))
+                self.params = RoomParams.from_dict(params)
             except (KeyError, TypeError, ValueError):
-                continue
-        self._update_summary()
+                self.params = None
+        fit_info = stored.get("fit") or {}
+        self.last_fit_time = fit_info.get("time")
+        self.last_fit_outcome = fit_info.get("outcome")
+        self._stored_errors = fit_info.get("forecast_errors")
+        if self.params is not None:
+            # Run the filter over the stored history: it starts settled.
+            state = await self.hass.async_add_executor_job(
+                warm_state, self.params, self.history.series(1)
+            )
+            self._apply(self.params, state)
+        # Estimates of the old step calibration (before 0.4) are not used.
+        await Store(self.hass, 1, f"{DOMAIN}.{self._entry_id}").async_remove()
 
         entities = [
             e
@@ -261,6 +309,13 @@ class HeatFluxEngine:
                 self.hass, self._on_tick, timedelta(seconds=SAMPLE_INTERVAL_SECONDS)
             )
         )
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass,
+                self._on_fit_timer,
+                timedelta(minutes=FIT_CHECK_MINUTES),
+            )
+        )
         if self.uses_open_meteo:
             self._unsubs.append(
                 async_track_time_interval(
@@ -273,11 +328,15 @@ class HeatFluxEngine:
                 self.async_refresh_outdoor(), f"{DOMAIN} outdoor temperature"
             )
         self._refresh(sample=True)
+        self.hass.async_create_background_task(
+            self.async_maybe_fit(), f"{DOMAIN} room model fit"
+        )
 
     async def async_stop(self) -> None:
-        """Stop listening."""
+        """Stop listening and save the history."""
         while self._unsubs:
             self._unsubs.pop()()
+        await self._store.async_save(self._data())
 
     @callback
     def async_add_listener(self, update: Callable[[], None]) -> Callable[[], None]:
@@ -445,8 +504,9 @@ class HeatFluxEngine:
         mode = direction.mode
         cop: CopResult | None = None
         thermal: float | None = None
+        delivering = coil_delivers(mode, coil, room)
         if raw is not None and mode is not None:
-            if mode == MODE_OFF or direction.defrost:
+            if mode == MODE_OFF or direction.defrost or not delivering:
                 thermal = 0.0
             else:
                 magnitude = abs(raw)
@@ -454,7 +514,7 @@ class HeatFluxEngine:
                     cop = self._cop(mode, room, coil)
                     magnitude *= cop.value
                 thermal = magnitude if mode == MODE_HEAT else -magnitude
-        return Reading(room, raw, direction, thermal, cop, paused)
+        return Reading(room, raw, direction, thermal, cop, paused, delivering)
 
     def _cop(self, mode: str, room: float | None, coil: float | None) -> CopResult:
         if self.config[CONF_COP_MODE] == COP_FIXED:
@@ -476,104 +536,231 @@ class HeatFluxEngine:
         now = dt_util.utcnow().timestamp()
         reading = self.read(now)
         self.reading = reading
-        if (
-            sample
-            and reading.temperature is not None
-            and reading.thermal_power is not None
-        ):
-            item = Sample(
-                t=now,
-                power=reading.thermal_power,
-                temperature=reading.temperature,
-                mode=reading.direction.mode or MODE_OFF,
-                calibratable=reading.calibratable,
-            )
-            self._add_sample(item)
-        self._update_live(now)
+        if sample:
+            self._sample(now, reading)
         self._notify()
 
-    def _add_sample(self, sample: Sample) -> None:
-        self._live.append(sample)
-        while self._live and self._live[0].t < sample.t - self._live_seconds:
+    def _sample(self, now: float, reading: Reading) -> None:
+        power = reading.thermal_power
+        self.history.add(now, reading.temperature, power, reading.fittable)
+        if power is not None:
+            self._last_power = power
+        if reading.temperature is not None and power is not None:
+            self._live.append(Sample(now, power, reading.temperature))
+        while self._live and self._live[0].t < now - self._live_seconds:
             self._live.popleft()
-        result = self.calibrator.add(sample)
-        if result is None:
-            return
-        self.last_event = result
-        if result.estimate is not None:
-            _LOGGER.info(
-                "Heat capacity %.0f Wh/K from a step of %.0f W (%s)",
-                result.estimate.capacity,
-                result.estimate.power_after - result.estimate.power_before,
-                result.estimate.mode,
-            )
-            self.estimates = [*self.estimates, result.estimate][-MAX_ESTIMATES:]
-            self._update_summary()
-            self._save()
-        else:
-            _LOGGER.debug("Calibration event rejected: %s", result.reason)
-
-    def _update_live(self, now: float) -> None:
-        samples = [s for s in self._live if s.t >= now - self._live_seconds]
-        stats = window_stats(samples)
+        stats = window_stats(self._live)
         if stats is None or stats.span < self._live_seconds * 0.5:
-            self.temperature_rate = self.mean_power = self.net_heat_gain = None
+            self.temperature_rate = None
+        else:
+            self.temperature_rate = stats.slope
+        self._step_filter(now, reading.temperature)
+        self._save()
+
+    def _step_filter(self, now: float, measured: float | None) -> None:
+        """Advance the live filter; the AC heat of the last interval counts."""
+        if self.filter is None:
             return
-        self.temperature_rate = stats.slope
-        self.mean_power = stats.mean_power
-        capacity = self.capacity
-        self.net_heat_gain = (
-            None if capacity is None else net_heat_gain(stats, capacity)
-        )
+        previous = self._filter_time
+        self._filter_time = now
+        if previous is None or not self.filter.ready:
+            if measured is not None:
+                self.filter.reset(measured)
+            self._update_settled()
+            return
+        dt = (now - previous) / 3600
+        if dt <= 0:
+            return
+        if dt > FILTER_RESET_HOURS:
+            if measured is not None:
+                self.filter.reset(measured, gain=self.filter.net_gain or 0.0)
+            self._update_settled()
+            return
+        self.filter.step(dt, self._last_power, measured)
+        self._update_settled()
 
-    # -------------------------------------------------------------- capacity
+    def _update_settled(self) -> None:
+        if self.filter is None or not self.filter.ready:
+            self.settled_temperature = None
+            return
+        self.settled_temperature = self.filter.forecast(1.0, 0.0)[AIR]
+
+    # ----------------------------------------------------------------- model
 
     @property
-    def calibration_modes(self) -> tuple[str, ...]:
-        """Modes whose events count for the heat capacity."""
-        return {
-            MODES_ALL: (MODE_HEAT, MODE_COOL),
-            MODES_HEAT: (MODE_HEAT,),
-            MODES_COOL: (MODE_COOL,),
-        }[self.config.get(CONF_CALIBRATION_MODES, MODES_ALL)]
-
-    def _update_summary(self) -> None:
-        self.summary = summarize(self.estimates, self.calibration_modes)
+    def status(self) -> str:
+        """Learning (not enough data yet), fitting or ready."""
+        if self.fitting:
+            return ModelStatus.FITTING
+        return ModelStatus.READY if self.params is not None else ModelStatus.LEARNING
 
     @property
-    def manual_capacity(self) -> float | None:
-        """Manual heat capacity override, if set."""
-        value = _float(self.config.get(CONF_MANUAL_CAPACITY))
-        return value if value else None
+    def ready(self) -> bool:
+        """Whether the model has parameters."""
+        return self.params is not None
 
     @property
     def capacity(self) -> float | None:
-        """Heat capacity in use (Wh/K)."""
-        return self.manual_capacity or self.summary.capacity
+        """Total heat capacity, air and mass (Wh/K)."""
+        return self.params.total_capacity if self.params else None
 
     @property
-    def calibrated(self) -> bool:
-        """Enough valid events, or a manual heat capacity."""
-        return bool(self.manual_capacity) or self.summary.inliers >= int(
-            self.config[CONF_MIN_EVENTS]
-        )
+    def estimated_temperature(self) -> float | None:
+        """The room's mass temperature (°C)."""
+        return self.filter.mass_temperature if self.filter else None
 
     @property
-    def calibration_state(self) -> CalibrationState:
-        """What the step detection is doing."""
-        return self.calibrator.state
+    def air_temperature(self) -> float | None:
+        """The filtered air temperature (°C)."""
+        return self.filter.air_temperature if self.filter else None
 
-    def _save(self) -> None:
+    @property
+    def net_heat_gain(self) -> float | None:
+        """Net heat flow into the room without the AC (W)."""
+        return self.filter.net_gain if self.filter else None
+
+    @property
+    def delivered_heat(self) -> float | None:
+        """AC heat that reaches the room right now (W)."""
+        return self.filter.delivered if self.filter else None
+
+    @property
+    def estimated_rate(self) -> float | None:
+        """Rate of change of the mass temperature (K/h)."""
+        return self.filter.mass_rate() if self.filter else None
+
+    @property
+    def forecast_errors(self) -> list[float] | None:
+        """RMS forecast errors at 15, 30, 60 min of the last fit (K)."""
+        if self.last_fit is not None:
+            return self.last_fit.forecast_errors
+        return self._stored_errors
+
+    def _fit_due(self, now: float) -> bool:
+        if self.fitting:
+            return False
+        if self.history.hours < MIN_HISTORY_HOURS:
+            return False
+        if self.history.active_changes() < MIN_AC_CHANGES:
+            return False
+        if self.params is None or self.last_fit_time is None:
+            return True
+        return now - self.last_fit_time >= self._refit_seconds
+
+    async def _on_fit_timer(self, _now: datetime) -> None:
+        await self.async_maybe_fit()
+
+    async def async_maybe_fit(self, force: bool = False) -> None:
+        """Fit the room model if it is due (or forced and there is data)."""
+        now = dt_util.utcnow().timestamp()
+        if not (self._fit_due(now) or (force and not self.fitting)):
+            return
+        series = self.history.series(FIT_STEP_MINUTES)
+        fine = self.history.series(1)
+        current = self.params
+        self.fitting = True
+        self._notify()
+        started = time.monotonic()
+        try:
+            result, current_cost, state = await self.hass.async_add_executor_job(
+                _run_fit, series, fine, current
+            )
+        finally:
+            self.fitting = False
+        self.last_fit_seconds = time.monotonic() - started
+        self.last_fit_time = now
+        if result is None:
+            self.last_fit_outcome = "not_enough_data"
+        elif current_cost is not None and result.cost > current_cost * FIT_ACCEPT_RATIO:
+            self.last_fit_outcome = "kept_previous"
+        else:
+            self.last_fit_outcome = "updated"
+            self.last_fit = result
+            self._apply(result.params, state)
+            _LOGGER.info(
+                "Room model: air %.0f Wh/K, mass %.0f Wh/K, coupling %.0f W/K, "
+                "heat delay %.1f min; forecast error %.2f K at 1 h (%.0f s)",
+                result.params.air_capacity,
+                result.params.mass_capacity,
+                result.params.coupling,
+                result.params.heat_delay,
+                result.forecast_errors[-1],
+                self.last_fit_seconds,
+            )
+        self._save(immediately=True)
+        self._notify()
+
+    def _apply(self, params: RoomParams, state: list[float] | None) -> None:
+        """Use new parameters, starting from the state replayed on the history.
+
+        The history ends with the last complete minute, so the live filter
+        continues from there.
+        """
+        self.params = params
+        self.filter = RoomFilter(params)
+        if state is not None:
+            self.filter.x = list(state)
+            self._filter_time = self.history.end
+        self._update_settled()
+
+    # --------------------------------------------------------------- storage
+
+    def _data(self) -> dict[str, Any]:
+        errors = self.forecast_errors
+        return {
+            "params": self.params.as_dict() if self.params else None,
+            "fit": {
+                "time": self.last_fit_time,
+                "outcome": self.last_fit_outcome,
+                "forecast_errors": list(errors) if errors else None,
+            },
+            "history": self.history.as_dict(),
+        }
+
+    def _save(self, immediately: bool = False) -> None:
+        # The history changes every minute; write it every 10 minutes (and
+        # on shutdown), the model right away. A new delayed save request
+        # restarts the delay, so only ask when none is pending.
+        now = time.monotonic()
+        if (
+            not immediately
+            and self._save_requested is not None
+            and now - self._save_requested < SAVE_DELAY_SECONDS
+        ):
+            return
+        self._save_requested = now
         self._store.async_delay_save(
-            lambda: {"estimates": [e.as_dict() for e in self.estimates]}, 5
+            self._data, 1 if immediately else SAVE_DELAY_SECONDS
         )
 
     async def async_reset(self) -> None:
-        """Forget all estimates and start calibrating again."""
-        self.estimates = []
-        self.last_event = None
-        self.calibrator.reset()
-        self._update_summary()
-        await self._store.async_save({"estimates": []})
-        self._update_live(dt_util.utcnow().timestamp())
+        """Forget the model and the history and start learning again."""
+        self.params = None
+        self.filter = None
+        self.last_fit = None
+        self.last_fit_time = None
+        self.last_fit_outcome = None
+        self._stored_errors = None
+        self.settled_temperature = None
+        self.history.clear()
+        await self._store.async_save(self._data())
         self._notify()
+
+
+def _run_fit(
+    series: Series, fine: Series, current: RoomParams | None
+) -> tuple[FitResult | None, float | None, list[float] | None]:
+    """Fit in the executor.
+
+    Also returns the cost of the current parameters (to compare) and the
+    filter state of the new ones after the history at 1 min resolution.
+    """
+    current_cost = prediction_cost(current, series)[0] if current else None
+    if current is None:
+        result = fit(series, max_evaluations=FIT_EVALUATIONS)
+    else:
+        result = fit(
+            series, start=current, max_evaluations=REFIT_EVALUATIONS, restarts=False
+        )
+    state = warm_state(result.params, fine) if result else None
+    return result, current_cost, state

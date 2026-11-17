@@ -1,4 +1,4 @@
-"""Setup, entities and a full calibration through Home Assistant states."""
+"""Setup, entities and the room model learned through Home Assistant states."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from custom_components.heatflux.const import (
     CONF_CLIMATE,
     CONF_COIL,
     CONF_COMPRESSOR,
-    CONF_MIN_EVENTS,
     CONF_OUTDOOR_SOURCE,
     CONF_POWER,
     CONF_POWER_TYPE,
@@ -33,7 +32,9 @@ from custom_components.heatflux.const import (
     POWER_ELECTRICAL,
     POWER_THERMAL,
 )
-from custom_components.heatflux.engine import Direction, ac_direction
+from custom_components.heatflux.engine import Direction, ac_direction, coil_delivers
+
+from .room_sim import SimRoom
 
 ROOM = "sensor.room_temperature"
 POWER = "sensor.ac_power"
@@ -102,6 +103,15 @@ def test_ac_direction() -> None:
     assert ac_direction(None, "heat", True, 5, 20) == Direction("heat", defrost=True)
 
 
+def test_coil_delivers() -> None:
+    assert coil_delivers("heat", None, 20)
+    assert not coil_delivers("heat", 23, 20)  # fan still waits for a warm coil
+    assert coil_delivers("heat", 45, 20)
+    assert not coil_delivers("cool", 22, 25)
+    assert coil_delivers("cool", 10, 25)
+    assert coil_delivers("off", 20, 20)
+
+
 async def test_entities(hass: HomeAssistant, open_meteo) -> None:
     set_inputs(hass, 21.0, 250)
     entry = await setup(hass)
@@ -111,27 +121,38 @@ async def test_entities(hass: HomeAssistant, open_meteo) -> None:
     }
     assert ids == {
         "sensor.living_room_net_heat_gain",
+        "sensor.living_room_room_temperature_estimated",
         "sensor.living_room_temperature_rate",
         "sensor.living_room_heat_capacity",
+        "sensor.living_room_air_heat_capacity",
+        "sensor.living_room_mass_heat_capacity",
+        "sensor.living_room_air_time_constant",
+        "sensor.living_room_ac_heat_delay",
+        "sensor.living_room_forecast_error_1_h",
         "sensor.living_room_ac_heat_output",
         "sensor.living_room_cop",
         "sensor.living_room_outdoor_temperature",
-        "sensor.living_room_calibration_status",
-        "binary_sensor.living_room_heat_capacity_calibrated",
-        "button.living_room_reset_calibration",
+        "sensor.living_room_model_status",
+        "binary_sensor.living_room_room_model_ready",
+        "button.living_room_fit_room_model_now",
+        "button.living_room_reset_room_model",
     }
     # Rated heating COP 4.0 at 7 °C outdoors from Open-Meteo, 20 °C inside.
     assert float(hass.states.get("sensor.living_room_outdoor_temperature").state) == 7
     output = hass.states.get("sensor.living_room_ac_heat_output")
     assert float(output.state) == pytest.approx(250 * 3.9, rel=0.05)
     assert output.attributes["mode"] == "heat"
+    # Nothing learned yet.
     assert hass.states.get("sensor.living_room_heat_capacity").state == "unknown"
     assert hass.states.get("sensor.living_room_net_heat_gain").state == "unknown"
     assert (
-        hass.states.get("binary_sensor.living_room_heat_capacity_calibrated").state
-        == "off"
+        hass.states.get("sensor.living_room_room_temperature_estimated").state
+        == "unknown"
     )
-    assert hass.states.get("sensor.living_room_calibration_status").state == "waiting"
+    assert hass.states.get("binary_sensor.living_room_room_model_ready").state == "off"
+    status = hass.states.get("sensor.living_room_model_status")
+    assert status.state == "learning"
+    assert status.attributes["history_hours"] == 0
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert (
@@ -162,99 +183,106 @@ async def test_thermal_signed_power_without_climate(hass: HomeAssistant) -> None
     assert hass.states.get("sensor.living_room_cop") is None
 
 
-async def test_defrost_from_coil(hass: HomeAssistant, open_meteo) -> None:
+async def test_cold_coil_delivers_no_heat(hass: HomeAssistant, open_meteo) -> None:
     set_inputs(hass, 21.0, 600)
     hass.states.async_set(COIL, "2.0", {"unit_of_measurement": "°C"})
     await setup(hass, **{CONF_COIL: COIL})
     state = hass.states.get("sensor.living_room_ac_heat_output")
     assert float(state.state) == 0
     assert state.attributes["defrost"] is True
-    assert hass.states.get("sensor.living_room_calibration_status").state == "paused"
+    assert state.attributes["coil_ready"] is False
+    # Warm coil: heat counts.
+    hass.states.async_set(COIL, "44.0", {"unit_of_measurement": "°C"})
+    await hass.async_block_till_done()
+    state = hass.states.get("sensor.living_room_ac_heat_output")
+    assert float(state.state) > 1000
+    assert state.attributes["coil_ready"] is True
 
 
-async def test_calibration_through_states(
+async def test_model_learned_through_states(
     hass: HomeAssistant,
     freezer: FrozenDateTimeFactory,
     hass_storage: dict[str, Any],
 ) -> None:
-    """Room with C = 200 Wh/K and a loss of 300 W; the AC starts heating."""
-    capacity, loss, electrical, cop = 200.0, 300.0, 250.0, 4.0
-    temperature = 21.0
-    set_inputs(hass, temperature, 5, action="idle", compressor=False)
-    entry = await setup(
-        hass,
-        options={
-            **SOURCES,
-            CONF_OUTDOOR_SOURCE: OUTDOOR_NONE,  # rated COP: 4.0
-            CONF_MIN_EVENTS: 1,
-        },
-    )
+    """A simulated room cycling on a thermostat; the model learns it."""
+    cop = 4.0  # rated, no outdoor temperature
+    room = SimRoom()
 
-    for tick in range(1, 2 * 60 + 1):  # 60 minutes, 30 s ticks
-        heating = tick > 60
-        thermal = electrical * cop if heating else 0.0
-        temperature += (thermal - loss) / capacity * 30 / 3600
+    def publish() -> None:
         set_inputs(
             hass,
-            round(temperature, 1),
-            electrical if heating else 5,
-            action="heating" if heating else "idle",
-            compressor=heating,
+            room.measured(),
+            room.power / cop if room.on else 5.0,
+            action="heating" if room.on else "idle",
+            compressor=room.on,
         )
+
+    publish()
+    entry = await setup(hass, options={**SOURCES, CONF_OUTDOOR_SOURCE: OUTDOOR_NONE})
+    for _ in range(13 * 120):  # 13 hours of 30 s ticks
+        room.advance(30)
+        publish()
         freezer.tick(timedelta(seconds=30))
         async_fire_time_changed(hass)
         await hass.async_block_till_done()
+    # The fit runs in the executor in the background.
+    await hass.async_block_till_done(wait_background_tasks=True)
 
-    state = hass.states.get("sensor.living_room_heat_capacity")
-    assert float(state.state) == pytest.approx(capacity, rel=0.15)
-    assert state.attributes["valid_events"] == 1
-    assert state.attributes["heating_events"] == 1
-    assert (
-        hass.states.get("binary_sensor.living_room_heat_capacity_calibrated").state
-        == "on"
+    status = hass.states.get("sensor.living_room_model_status")
+    assert status.state == "ready", status.attributes
+    assert status.attributes["last_fit_result"] == "updated"
+    assert hass.states.get("binary_sensor.living_room_room_model_ready").state == "on"
+
+    capacity = hass.states.get("sensor.living_room_heat_capacity")
+    total = room.air_capacity + room.mass_capacity
+    assert float(capacity.state) == pytest.approx(total, rel=0.3)
+    assert capacity.attributes["air_heat_capacity"] == pytest.approx(
+        room.air_capacity, rel=0.3
     )
-    rate = float(hass.states.get("sensor.living_room_temperature_rate").state)
-    assert rate == pytest.approx((electrical * cop - loss) / capacity, rel=0.15)
-    # The live window still reaches back before the step; the balance holds.
-    # The room loses 300 W: the net heat gain is negative.
-    gain_state = hass.states.get("sensor.living_room_net_heat_gain")
-    assert float(gain_state.state) == pytest.approx(-loss, abs=80)
+    assert capacity.attributes["forecast_error_60min"] < 0.2
 
-    # Persisted after the save delay.
-    freezer.tick(timedelta(seconds=10))
+    # Keep running a little with the model: live estimates.
+    for _ in range(120):
+        room.advance(30)
+        publish()
+        freezer.tick(timedelta(seconds=30))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+    estimated = hass.states.get("sensor.living_room_room_temperature_estimated")
+    assert float(estimated.state) == pytest.approx(room.mass, abs=0.3)
+    assert estimated.attributes["air_temperature"] == pytest.approx(room.air, abs=0.3)
+    gain = float(hass.states.get("sensor.living_room_net_heat_gain").state)
+    assert gain == pytest.approx(room.gain(room.t), abs=200)
+
+    # Stored right away, and the model survives a reload.
+    freezer.tick(timedelta(seconds=5))
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
-    stored = hass_storage[f"{DOMAIN}.{entry.entry_id}"]["data"]["estimates"]
-    assert len(stored) == 1
-
-    # Survives a reload.
+    stored = hass_storage[f"{DOMAIN}.{entry.entry_id}.model"]["data"]
+    assert stored["params"]["air_capacity"] > 0
+    assert len(stored["history"]["power"]) > 13 * 60
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
+    assert hass.states.get("sensor.living_room_model_status").state == "ready"
     assert float(
         hass.states.get("sensor.living_room_heat_capacity").state
-    ) == pytest.approx(capacity, rel=0.15)
+    ) == pytest.approx(float(capacity.state), rel=1e-3)
 
-    # Reset.
+    # Reset, then a forced fit without data keeps learning.
     await hass.services.async_call(
         "button",
         "press",
-        {"entity_id": "button.living_room_reset_calibration"},
+        {"entity_id": "button.living_room_reset_room_model"},
         blocking=True,
     )
     assert hass.states.get("sensor.living_room_heat_capacity").state == "unknown"
-    assert hass_storage[f"{DOMAIN}.{entry.entry_id}"]["data"]["estimates"] == []
-
-
-async def test_manual_capacity(hass: HomeAssistant) -> None:
-    set_inputs(hass, 21.0, 250)
-    await setup(
-        hass,
-        options={**SOURCES, CONF_OUTDOOR_SOURCE: OUTDOOR_NONE, "manual_capacity": 350},
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.model"]["data"]["params"] is None
+    await hass.services.async_call(
+        "button",
+        "press",
+        {"entity_id": "button.living_room_fit_room_model_now"},
+        blocking=True,
     )
-    state = hass.states.get("sensor.living_room_heat_capacity")
-    assert float(state.state) == 350
-    assert state.attributes["source"] == "manual"
-    assert (
-        hass.states.get("binary_sensor.living_room_heat_capacity_calibrated").state
-        == "on"
-    )
+    status = hass.states.get("sensor.living_room_model_status")
+    assert status.state == "learning"
+    assert status.attributes["last_fit_result"] == "not_enough_data"
