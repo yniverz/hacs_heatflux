@@ -118,6 +118,8 @@ def _status_attrs(engine: HeatFluxEngine) -> dict[str, Any]:
         "last_fit": _time(engine.last_fit_time),
         "last_fit_result": engine.last_fit_outcome,
         "last_fit_seconds": _round(engine.last_fit_seconds, 1),
+        "last_import": _time(engine.last_import_time),
+        "last_import_result": engine.last_import_outcome,
     }
 
 

@@ -59,8 +59,12 @@ fast, the estimate still knows where it would have settled.
 ### Learning the model
 
 The integration keeps a per-minute history (default: 4 days, kept across
-restarts). Once there are 12 hours with the AC switching on and off a few
-times, it fits the model's parameters (air and mass heat capacity, coupling,
+restarts). **On first setup it fills that history from Home Assistant's
+recorder**: the recorded states of the input entities are replayed every 30 s
+through the same code as the live readings (for past outdoor temperatures it
+asks Open-Meteo), so with a few recorded days the model is ready within
+seconds. Without recorded data it waits until there are 12 hours with the AC
+switching on and off a few times. It fits the model's parameters (air and mass heat capacity, coupling,
 heat delay, how fast the net heat gain may change) for the **best 15, 30 and
 60 minute forecasts** of the room temperature. It fits again every 6 hours; a
 new fit replaces the old one only if it forecasts at least as well. Fitting
@@ -181,8 +185,10 @@ Under **Configure**:
 - **Room model:** history length, how often to fit again, and the window of
   the measured temperature rate.
 
-The first values appear after about 12 hours of normal AC operation. Until
-then the model status is *Learning*.
+If the recorder has the last days of the input entities (it keeps 10 days by
+default), the model is ready a few seconds after setup. Otherwise the first
+values appear after about 12 hours of normal AC operation; until then the
+model status is *Learning*.
 
 ### Example: Kältebringer KBR290 (12000 BTU, R290)
 
@@ -218,9 +224,10 @@ For a room named *Living room*:
 | `sensor.living_room_ac_heat_output` | W | Thermal power of the AC (signed). Attributes: mode, defrost, coil ready, input power, COP. |
 | `sensor.living_room_cop` | – | Diagnostic, electrical power only. Attributes: refrigerant temperatures, η. |
 | `sensor.living_room_outdoor_temperature` | °C | Diagnostic, the value the COP model uses. |
-| `sensor.living_room_model_status` | – | Learning / Fitting / Ready. Attributes: history hours, AC switches, last fit and its result. |
+| `sensor.living_room_model_status` | – | Learning / Importing history / Fitting / Ready. Attributes: history hours, AC switches, last fit, last import and their results. |
 | `binary_sensor.living_room_room_model_ready` | – | On once the model has been fitted. |
-| `button.living_room_fit_room_model_now` | – | Fit right away (e.g. after changing the COP). |
+| `button.living_room_fit_room_model_now` | – | Fit right away. |
+| `button.living_room_rebuild_history_from_recorder` | – | Replace the history with the recorder's and fit again. Use it after changing the COP or the input sensors: the stored history holds heat output computed with the old settings. |
 | `button.living_room_reset_room_model` | – | Forget the model and the history. |
 
 ## Caveats
@@ -230,7 +237,9 @@ For a room named *Living room*:
 - **Cooling includes dehumidification.** Part of the cooling power condenses
   water instead of cooling air, which the model sees as a bit less cooling.
 - **Changing the COP settings** changes the heat output and so the fitted
-  heat capacities; press *Fit room model now* afterwards.
+  heat capacities; press *Rebuild history from recorder* afterwards.
+- **Entities excluded from the recorder** can't be imported; the model then
+  learns from live data only.
 - **Portable single-hose ACs** pull outside air into the room while running.
   Part of the heat loss is then caused by the AC itself.
 

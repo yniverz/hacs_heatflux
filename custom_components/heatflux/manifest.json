@@ -1,6 +1,7 @@
 {
   "domain": "heatflux",
   "name": "Heat Flux",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@yniverz"],
   "config_flow": true,
   "documentation": "https://github.com/yniverz/hacs_heatflux",
@@ -8,5 +9,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/yniverz/hacs_heatflux/issues",
   "requirements": [],
-  "version": "0.4.0"
+  "version": "0.5.0"
 }

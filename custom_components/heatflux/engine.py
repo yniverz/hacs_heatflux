@@ -18,7 +18,13 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTemperature,
 )
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.core import (
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    State,
+    callback,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -28,6 +34,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import PowerConverter, TemperatureConverter
 
+from .backfill import async_rebuild_history
 from .const import (
     COIL_DELIVERY_MARGIN,
     COIL_DIRECTION_MARGIN,
@@ -94,6 +101,8 @@ from .physics import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+StateGetter = Callable[[str], State | None]
 
 SAVE_DELAY_SECONDS = 600
 
@@ -167,6 +176,18 @@ def _float(value: Any) -> float | None:
     return result if result == result else None  # NaN
 
 
+def _celsius(value: Any, unit: str | None) -> float | None:
+    number = _float(value)
+    if number is None:
+        return None
+    if unit and unit != UnitOfTemperature.CELSIUS:
+        try:
+            return TemperatureConverter.convert(number, unit, UnitOfTemperature.CELSIUS)
+        except Exception:  # noqa: BLE001 - unknown unit: take the number
+            return number
+    return number
+
+
 def coil_delivers(mode: str | None, coil: float | None, room: float | None) -> bool:
     """Whether the indoor coil is hot (heating) or cold (cooling) enough.
 
@@ -206,9 +227,10 @@ class ModelStatus:
     """What the room model is doing."""
 
     LEARNING = "learning"
+    IMPORTING = "importing"
     FITTING = "fitting"
     READY = "ready"
-    ALL = (LEARNING, FITTING, READY)
+    ALL = (LEARNING, IMPORTING, FITTING, READY)
 
 
 class HeatFluxEngine:
@@ -246,6 +268,10 @@ class HeatFluxEngine:
         self.last_fit_seconds: float | None = None
         self.last_fit_outcome: str | None = None
         self.fitting = False
+        self.importing = False
+        self._import_buffer: list[tuple[float, float | None, float | None, bool]] = []
+        self.last_import_time: float | None = None
+        self.last_import_outcome: str | None = None
         self._stored_errors: list[float] | None = None
         self._save_requested: float | None = None
         self.filter: RoomFilter | None = None
@@ -288,19 +314,7 @@ class HeatFluxEngine:
         # Estimates of the old step calibration (before 0.4) are not used.
         await Store(self.hass, 1, f"{DOMAIN}.{self._entry_id}").async_remove()
 
-        entities = [
-            e
-            for e in (
-                self.config.get(CONF_TEMPERATURE),
-                self.config.get(CONF_POWER),
-                self.config.get(CONF_CLIMATE),
-                self.config.get(CONF_COMPRESSOR),
-                self.config.get(CONF_COIL),
-                self.outdoor_entity,
-                *(self.config.get(CONF_PAUSE) or []),
-            )
-            if e
-        ]
+        entities = self.input_entities
         self._unsubs.append(
             async_track_state_change_event(self.hass, entities, self._on_state_change)
         )
@@ -329,8 +343,14 @@ class HeatFluxEngine:
             )
         self._refresh(sample=True)
         self.hass.async_create_background_task(
-            self.async_maybe_fit(), f"{DOMAIN} room model fit"
+            self._async_startup(), f"{DOMAIN} history import and fit"
         )
+
+    async def _async_startup(self) -> None:
+        """Fill a short history from the recorder, then fit if due."""
+        if self.history.hours < self.history.max_minutes / 60 * 0.9:
+            await self.async_import_history()
+        await self.async_maybe_fit()
 
     async def async_stop(self) -> None:
         """Stop listening and save the history."""
@@ -413,44 +433,47 @@ class HeatFluxEngine:
             ):
                 return None
             return self._outdoor_fetched_value
+        return self.outdoor_from_entity(self.hass.states.get)
+
+    def outdoor_from_entity(self, get: StateGetter) -> float | None:
+        """Outdoor temperature from the configured sensor or weather entity."""
         entity = self.outdoor_entity
-        if not entity or (state := self.hass.states.get(entity)) is None:
+        if not entity or (state := get(entity)) is None:
             return None
         if state.domain == "weather":
-            return self._celsius(
+            return _celsius(
                 state.attributes.get("temperature"),
                 state.attributes.get("temperature_unit"),
             )
-        return self._celsius(
-            state.state, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        )
+        return _celsius(state.state, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
 
     # ---------------------------------------------------------------- inputs
 
-    @staticmethod
-    def _celsius(value: Any, unit: str | None) -> float | None:
-        number = _float(value)
-        if number is None:
-            return None
-        if unit and unit != UnitOfTemperature.CELSIUS:
-            try:
-                return TemperatureConverter.convert(
-                    number, unit, UnitOfTemperature.CELSIUS
-                )
-            except Exception:  # noqa: BLE001 - unknown unit: take the number
-                return number
-        return number
+    @property
+    def input_entities(self) -> list[str]:
+        """All entities the readings depend on."""
+        return [
+            e
+            for e in (
+                self.config.get(CONF_TEMPERATURE),
+                self.config.get(CONF_POWER),
+                self.config.get(CONF_CLIMATE),
+                self.config.get(CONF_COMPRESSOR),
+                self.config.get(CONF_COIL),
+                self.outdoor_entity,
+                *(self.config.get(CONF_PAUSE) or []),
+            )
+            if e
+        ]
 
-    def _temperature(self, key: str) -> float | None:
+    def _temperature(self, key: str, get: StateGetter) -> float | None:
         entity = self.config.get(key)
-        if not entity or (state := self.hass.states.get(entity)) is None:
+        if not entity or (state := get(entity)) is None:
             return None
-        return self._celsius(
-            state.state, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        )
+        return _celsius(state.state, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
 
-    def _power(self) -> float | None:
-        state = self.hass.states.get(self.config[CONF_POWER])
+    def _power(self, get: StateGetter) -> float | None:
+        state = get(self.config[CONF_POWER])
         if state is None:
             return None
         number = _float(state.state)
@@ -462,37 +485,47 @@ class HeatFluxEngine:
         except Exception:  # noqa: BLE001 - unknown unit: take the number
             return number
 
-    def _direction(self, room: float | None, coil: float | None) -> Direction:
+    def _direction(
+        self, room: float | None, coil: float | None, get: StateGetter
+    ) -> Direction:
         climate_id = self.config.get(CONF_CLIMATE)
         compressor: bool | None = None
         if entity := self.config.get(CONF_COMPRESSOR):
-            state = self.hass.states.get(entity)
+            state = get(entity)
             if state is not None and state.state in ("on", "off"):
                 compressor = state.state == STATE_ON
         if not climate_id:
             return Direction(None)
-        state = self.hass.states.get(climate_id)
+        state = get(climate_id)
         if state is None or state.state in ("unavailable", "unknown"):
             return Direction(None)
         return ac_direction(
             state.attributes.get("hvac_action"), state.state, compressor, coil, room
         )
 
-    def _paused(self) -> bool:
+    def _paused(self, get: StateGetter) -> bool:
         for entity in self.config.get(CONF_PAUSE) or []:
-            state = self.hass.states.get(entity)
+            state = get(entity)
             if state is not None and state.state in PAUSE_STATES:
                 return True
         return False
 
     def read(self, now: float) -> Reading:
         """Current inputs and the thermal power of the AC."""
-        room = self._temperature(CONF_TEMPERATURE)
-        coil = self._temperature(CONF_COIL)
-        raw = self._power()
-        paused = self._paused()
+        self.outdoor_temperature = self._outdoor(now)
+        return self.evaluate(self.hass.states.get, self.outdoor_temperature)
+
+    def evaluate(self, get: StateGetter, outdoor: float | None) -> Reading:
+        """Inputs and thermal power of the AC from the given states.
+
+        Pure: used for the live readings and to replay the recorder history.
+        """
+        room = self._temperature(CONF_TEMPERATURE, get)
+        coil = self._temperature(CONF_COIL, get)
+        raw = self._power(get)
+        paused = self._paused(get)
         if self.config.get(CONF_CLIMATE):
-            direction = self._direction(room, coil)
+            direction = self._direction(room, coil, get)
         elif raw is None:
             direction = Direction(None)
         else:
@@ -500,7 +533,6 @@ class HeatFluxEngine:
                 MODE_HEAT if raw > 0 else MODE_COOL if raw < 0 else MODE_OFF
             )
 
-        self.outdoor_temperature = self._outdoor(now)
         mode = direction.mode
         cop: CopResult | None = None
         thermal: float | None = None
@@ -511,15 +543,21 @@ class HeatFluxEngine:
             else:
                 magnitude = abs(raw)
                 if self.electrical:
-                    cop = self._cop(mode, room, coil)
+                    cop = self._cop(mode, room, coil, outdoor)
                     magnitude *= cop.value
                 thermal = magnitude if mode == MODE_HEAT else -magnitude
         return Reading(room, raw, direction, thermal, cop, paused, delivering)
 
-    def _cop(self, mode: str, room: float | None, coil: float | None) -> CopResult:
+    def _cop(
+        self,
+        mode: str,
+        room: float | None,
+        coil: float | None,
+        outdoor: float | None,
+    ) -> CopResult:
         if self.config[CONF_COP_MODE] == COP_FIXED:
             return CopResult(self.cop_model.rated(mode), "rated")
-        return self.cop_model.cop(mode, room, self.outdoor_temperature, coil)
+        return self.cop_model.cop(mode, room, outdoor, coil)
 
     # ------------------------------------------------------------ processing
 
@@ -542,7 +580,13 @@ class HeatFluxEngine:
 
     def _sample(self, now: float, reading: Reading) -> None:
         power = reading.thermal_power
-        self.history.add(now, reading.temperature, power, reading.fittable)
+        if self.importing:
+            # Appended to the imported history once it's ready.
+            self._import_buffer.append(
+                (now, reading.temperature, power, reading.fittable)
+            )
+        else:
+            self.history.add(now, reading.temperature, power, reading.fittable)
         if power is not None:
             self._last_power = power
         if reading.temperature is not None and power is not None:
@@ -589,7 +633,9 @@ class HeatFluxEngine:
 
     @property
     def status(self) -> str:
-        """Learning (not enough data yet), fitting or ready."""
+        """Learning (not enough data yet), importing, fitting or ready."""
+        if self.importing:
+            return ModelStatus.IMPORTING
         if self.fitting:
             return ModelStatus.FITTING
         return ModelStatus.READY if self.params is not None else ModelStatus.LEARNING
@@ -689,6 +735,51 @@ class HeatFluxEngine:
             )
         self._save(immediately=True)
         self._notify()
+
+    async def async_import_history(self, rebuild: bool = False) -> None:
+        """Replay the recorder's history of the inputs into the history.
+
+        Without `rebuild` the imported history only replaces the stored one
+        if it is longer (first setup, or after the recorder had more). With
+        it (after changing the COP or the sensors), it always replaces it
+        and the model is fitted again.
+        """
+        if self.importing:
+            return
+        self.importing = True
+        self._import_buffer = []
+        self._notify()
+        try:
+            imported = await async_rebuild_history(
+                self, self.history.max_minutes / 1440
+            )
+        except Exception:
+            _LOGGER.exception("Importing the recorder history failed")
+            imported = None
+        buffer, self._import_buffer = self._import_buffer, []
+        replaced = imported is not None and (
+            rebuild or imported.hours > self.history.hours
+        )
+        if replaced:
+            assert imported is not None
+            self.history = imported
+            self.last_import_outcome = "imported"
+            _LOGGER.info("Imported %.1f h of history from the recorder", imported.hours)
+        else:
+            self.last_import_outcome = "no_data" if imported is None else "kept"
+        for item in buffer:
+            self.history.add(*item)
+        self.importing = False
+        self.last_import_time = dt_util.utcnow().timestamp()
+        if replaced and self.params is not None:
+            state = await self.hass.async_add_executor_job(
+                warm_state, self.params, self.history.series(1)
+            )
+            self._apply(self.params, state)
+        self._save(immediately=True)
+        self._notify()
+        if replaced and rebuild:
+            await self.async_maybe_fit(force=True)
 
     def _apply(self, params: RoomParams, state: list[float] | None) -> None:
         """Use new parameters, starting from the state replayed on the history.

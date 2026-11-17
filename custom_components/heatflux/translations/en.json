@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add a room",
-        "description": "Net heat flow into or out of a room and the room's real temperature, from the AC power and the room temperature. A model of the room (air and mass) is learned from the data: the first fit needs about 12 hours with the AC switching on and off. Efficiency (COP) and model settings are under Configure afterwards.",
+        "description": "Net heat flow into or out of a room and the room's real temperature, from the AC power and the room temperature. A model of the room (air and mass) is learned from the data. If Home Assistant's recorder has the last days of the sensors, it is fitted right away; otherwise after about 12 hours with the AC switching on and off. Efficiency (COP) and model settings are under Configure afterwards.",
         "data": {
           "name": "Room name",
           "temperature_sensor": "Room temperature",
@@ -154,6 +154,7 @@
         "name": "Model status",
         "state": {
           "learning": "Learning",
+          "importing": "Importing history",
           "fitting": "Fitting",
           "ready": "Ready"
         }
@@ -167,6 +168,9 @@
     "button": {
       "fit_model": {
         "name": "Fit room model now"
+      },
+      "rebuild_history": {
+        "name": "Rebuild history from recorder"
       },
       "reset_model": {
         "name": "Reset room model"

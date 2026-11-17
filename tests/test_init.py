@@ -135,6 +135,7 @@ async def test_entities(hass: HomeAssistant, open_meteo) -> None:
         "sensor.living_room_model_status",
         "binary_sensor.living_room_room_model_ready",
         "button.living_room_fit_room_model_now",
+        "button.living_room_rebuild_history_from_recorder",
         "button.living_room_reset_room_model",
     }
     # Rated heating COP 4.0 at 7 °C outdoors from Open-Meteo, 20 °C inside.

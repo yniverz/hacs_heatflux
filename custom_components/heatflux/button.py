@@ -1,4 +1,4 @@
-"""Buttons: fit the room model now, or forget it."""
+"""Buttons: fit the room model now, rebuild its history, or forget it."""
 
 from __future__ import annotations
 
@@ -28,6 +28,12 @@ BUTTONS = (
         translation_key="fit_model",
         entity_category=EntityCategory.CONFIG,
         press_fn=lambda engine: engine.async_maybe_fit(force=True),
+    ),
+    HeatFluxButtonDescription(
+        key="rebuild_history",
+        translation_key="rebuild_history",
+        entity_category=EntityCategory.CONFIG,
+        press_fn=lambda engine: engine.async_import_history(rebuild=True),
     ),
     HeatFluxButtonDescription(
         key="reset_model",
